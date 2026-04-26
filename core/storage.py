@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .jst import now_iso
+
 # ファイルパス
 DATA_DIR = Path(__file__).parent.parent / "data"
 HISTORY_PATH = DATA_DIR / "history.json"
@@ -82,7 +84,7 @@ def save_entry(entry: dict[str, Any]) -> dict[str, Any]:
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
-        "created_at": datetime.now().isoformat(),
+        "created_at": now_iso(),
         **entry,
     }
     history = load_history()
@@ -96,7 +98,7 @@ def update_entry(entry_id: str, updates: dict[str, Any]) -> dict[str, Any] | Non
     history = load_history(include_deleted=True)
     for i, e in enumerate(history):
         if e.get("id") == entry_id:
-            history[i] = {**e, **updates, "updated_at": datetime.now().isoformat()}
+            history[i] = {**e, **updates, "updated_at": now_iso()}
             _write_json(HISTORY_PATH, history)
             return history[i]
     return None
@@ -106,7 +108,7 @@ def delete_entry(entry_id: str, reason: str = "") -> dict[str, Any] | None:
     """仕訳をソフト削除(復元可能)"""
     return update_entry(entry_id, {
         "is_deleted": True,
-        "deleted_at": datetime.now().isoformat(),
+        "deleted_at": now_iso(),
         "delete_reason": reason,
     })
 
@@ -117,7 +119,7 @@ def restore_entry(entry_id: str) -> dict[str, Any] | None:
         "is_deleted": False,
         "deleted_at": None,
         "delete_reason": None,
-        "restored_at": datetime.now().isoformat(),
+        "restored_at": now_iso(),
     })
 
 
@@ -190,7 +192,7 @@ def save_card_statement(statement: dict[str, Any]) -> dict[str, Any]:
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
-        "imported_at": datetime.now().isoformat(),
+        "imported_at": now_iso(),
         "match_status": "unmatched",
         "matched_journal_id": None,
         **statement,
@@ -214,7 +216,7 @@ def update_card_statement(
     statements = load_card_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
-            statements[i] = {**s, **updates, "updated_at": datetime.now().isoformat()}
+            statements[i] = {**s, **updates, "updated_at": now_iso()}
             _write_json(CARD_STATEMENTS_PATH, statements)
             return statements[i]
     return None
@@ -224,7 +226,7 @@ def delete_card_statement(statement_id: str, reason: str = "") -> dict[str, Any]
     """カード明細をソフト削除"""
     return update_card_statement(statement_id, {
         "is_deleted": True,
-        "deleted_at": datetime.now().isoformat(),
+        "deleted_at": now_iso(),
         "delete_reason": reason,
     })
 
@@ -235,7 +237,7 @@ def restore_card_statement(statement_id: str) -> dict[str, Any] | None:
         "is_deleted": False,
         "deleted_at": None,
         "delete_reason": None,
-        "restored_at": datetime.now().isoformat(),
+        "restored_at": now_iso(),
     })
 
 
@@ -278,7 +280,7 @@ def save_bank_statement(statement: dict[str, Any]) -> dict[str, Any]:
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
-        "imported_at": datetime.now().isoformat(),
+        "imported_at": now_iso(),
         "match_status": "unmatched",
         "matched_card_statement_ids": [],
         "settlement_journal_id": None,
@@ -303,7 +305,7 @@ def update_bank_statement(
     statements = load_bank_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
-            statements[i] = {**s, **updates, "updated_at": datetime.now().isoformat()}
+            statements[i] = {**s, **updates, "updated_at": now_iso()}
             _write_json(BANK_STATEMENTS_PATH, statements)
             return statements[i]
     return None
@@ -313,7 +315,7 @@ def delete_bank_statement(statement_id: str, reason: str = "") -> dict[str, Any]
     """銀行明細をソフト削除"""
     return update_bank_statement(statement_id, {
         "is_deleted": True,
-        "deleted_at": datetime.now().isoformat(),
+        "deleted_at": now_iso(),
         "delete_reason": reason,
     })
 
@@ -324,7 +326,7 @@ def restore_bank_statement(statement_id: str) -> dict[str, Any] | None:
         "is_deleted": False,
         "deleted_at": None,
         "delete_reason": None,
-        "restored_at": datetime.now().isoformat(),
+        "restored_at": now_iso(),
     })
 
 

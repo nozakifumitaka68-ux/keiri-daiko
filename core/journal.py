@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from .jst import now_date_str
+
 # 設定ファイル読込
 CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 
@@ -191,7 +193,7 @@ def generate_journal(ocr_result: dict[str, Any], client_id: str = "client_a") ->
     # 6. 仕訳エントリを構築
     return {
         "client_id": client_id,
-        "transaction_date": ocr_result.get("date") or datetime.now().strftime("%Y-%m-%d"),
+        "transaction_date": ocr_result.get("date") or now_date_str(),
         "vendor": ocr_result.get("vendor"),
         "vendor_registration_number": ocr_result.get("vendor_registration_number"),
         "debit": debit_credit["debit"],
@@ -415,7 +417,7 @@ def create_settlement_entry(
     """
     return {
         "client_id": client_id,
-        "transaction_date": transaction_date or datetime.now().strftime("%Y-%m-%d"),
+        "transaction_date": transaction_date or now_date_str(),
         "vendor": f"カード会社引落: {card_name or '未指定'}",
         "vendor_registration_number": None,
         "debit": "未払金",

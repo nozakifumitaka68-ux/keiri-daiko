@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from .jst import now_iso, now_yyyymmdd
 from .storage import save_entry
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class MockMFClient(MFClient):
         saved = save_entry({
             **journal,
             "mf_mode": "mock",
-            "registered_at": datetime.now().isoformat(),
+            "registered_at": now_iso(),
         })
 
         # ログにも残す
@@ -110,10 +111,10 @@ class MockMFClient(MFClient):
     def _log_event(self, event: str, data: dict[str, Any]) -> None:
         """イベントログ出力"""
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = LOG_DIR / f"mf_mock_{datetime.now().strftime('%Y%m%d')}.log"
+        log_file = LOG_DIR / f"mf_mock_{now_yyyymmdd()}.log"
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps({
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": now_iso(),
                 "event": event,
                 "data": data,
             }, ensure_ascii=False) + "\n")

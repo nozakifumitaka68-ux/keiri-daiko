@@ -16,6 +16,7 @@ from typing import Any
 
 from .duplicate import calculate_file_hash_from_path, find_duplicate_receipts
 from .journal import generate_journal
+from .jst import now_compact_str
 from .mf_client import get_mf_client
 from .ocr import extract_receipt
 from .storage import save_receipt_image
@@ -137,7 +138,7 @@ def process_receipt(
     if archive and path.exists():
         archive_dir = Path(__file__).parent.parent / "data" / "processed" / client_id
         archive_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = now_compact_str()
         archived_path = archive_dir / f"{timestamp}_{path.name}"
         shutil.copy2(path, archived_path)
         logger.info(f"[Archive] {path} -> {archived_path}")
