@@ -25,20 +25,93 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.yaml"
 # ===================================
 # 勘定科目推定のキーワードルール
 # ===================================
+
+# 軽食系: 金額に関わらず常に「会議費」(社内ランチ・打ち合わせ用)
+LIGHT_FOOD_KEYWORDS = [
+    # カフェ・喫茶店
+    "カフェ", "Cafe", "CAFE", "Coffee", "COFFEE", "コーヒー", "珈琲",
+    "スターバックス", "STARBUCKS", "ドトール", "タリーズ", "TULLY", "上島珈琲",
+    "ベローチェ", "ルノアール", "コメダ",
+    # 弁当・軽食・テイクアウト
+    "弁当", "べんとう", "BENTO", "ベントー",
+    "ほっかほっか", "ほっかほか", "ほっともっと", "オリジン", "玉子焼", "おにぎり",
+    "ランチ", "LUNCH", "lunch", "定食", "丼", "牛丼",
+    "吉野家", "すき家", "松屋", "なか卯", "天屋",
+    # 麺類
+    "蕎麦", "そば", "うどん", "ラーメン", "らーめん", "つけ麺",
+    "丸亀製麺", "はなまるうどん",
+    # ファストフード
+    "マクドナルド", "McDonald", "MCDONALD", "モスバーガー", "MOS", "ロッテリア",
+    "ケンタッキー", "KFC", "サブウェイ", "Subway", "バーガーキング",
+    # コンビニ・スーパー(食事用途)
+    "セブン-イレブン", "セブンイレブン", "セブン", "ローソン", "ファミリーマート",
+    "ミニストップ", "デイリーヤマザキ",
+    # ベーカリー
+    "パン", "ベーカリー", "BAKERY", "ドンク", "ヴィ・ド・フランス",
+]
+
+# 会食系: 金額で会議費⇄接待交際費を切替
+DINING_KEYWORDS = [
+    "居酒屋", "レストラン", "RESTAURANT", "Restaurant",
+    "料亭", "料理", "割烹", "懐石",
+    "バー", "BAR", "Bar", "ラウンジ", "クラブ", "スナック",
+    "宴会", "懇親", "会食", "ディナー", "DINNER",
+    "焼肉", "鮨", "寿司", "すし", "鮮魚",
+    "天ぷら", "和食", "中華", "イタリアン", "フレンチ", "韓国料理",
+    "ステーキ", "ホテル", "HOTEL",
+]
+
+# 1人当たり10,000円超は接待交際費(令和6年4月以降の税制改正準拠)
+ENTERTAINMENT_AMOUNT_THRESHOLD = 10000
+
+# その他の科目別キーワード(飲食以外)
 ACCOUNT_KEYWORDS = {
-    "旅費交通費": ["タクシー", "TAXI", "JR", "新幹線", "電車", "バス", "高速", "駐車", "ETC", "Uber"],
-    "接待交際費": ["居酒屋", "レストラン", "料亭", "バー", "BAR", "宴会", "懇親"],
-    "会議費": ["カフェ", "Cafe", "Coffee", "コーヒー", "スターバックス", "STARBUCKS", "ドトール"],
-    "事務用品費": ["文具", "ノート", "ペン", "ファイル", "コクヨ", "アスクル", "オフィス用品"],
-    "消耗品費": ["Amazon", "アマゾン", "ヨドバシ", "ビックカメラ"],
-    "通信費": ["NTT", "ドコモ", "Docomo", "Softbank", "ソフトバンク", "au", "光回線", "インターネット",
-              "AWS", "Microsoft", "Google", "GitHub", "OpenAI", "Anthropic"],
-    "水道光熱費": ["電気", "ガス", "水道", "東京電力", "東京ガス"],
-    "新聞図書費": ["書店", "BOOK", "紀伊国屋", "丸善", "Amazon Kindle", "新聞"],
-    "支払手数料": ["振込手数料", "事務手数料", "決済手数料"],
+    "旅費交通費": [
+        "タクシー", "TAXI", "Taxi", "JR", "新幹線", "電車", "バス", "高速", "駐車",
+        "ETC", "Uber", "UBER", "GO", "Lyft", "DiDi", "ANA", "JAL", "航空", "空港",
+        "鉄道", "京王", "京急", "東京メトロ", "都営",
+    ],
+    "事務用品費": [
+        "文具", "ノート", "ペン", "ファイル", "コクヨ", "アスクル", "ASKUL",
+        "オフィス用品", "封筒", "印鑑", "プリンタ", "コピー用紙", "トナー",
+    ],
+    "消耗品費": [
+        "Amazon", "アマゾン", "ヨドバシ", "ビックカメラ", "BIC", "ニトリ", "ダイソー",
+        "セリア", "キャンドゥ", "ホームセンター",
+    ],
+    "通信費": [
+        "NTT", "ドコモ", "DOCOMO", "Docomo", "Softbank", "ソフトバンク", "au",
+        "楽天モバイル", "光回線", "インターネット",
+        "AWS", "Amazon Web", "Microsoft", "Google", "GitHub", "OpenAI", "Anthropic",
+        "Slack", "Zoom", "Notion", "Stripe", "クラウド",
+    ],
+    "水道光熱費": [
+        "電気", "ガス", "水道", "東京電力", "東京ガス", "東京水道",
+        "関西電力", "中部電力", "九州電力", "TEPCO", "TGES",
+    ],
+    "新聞図書費": [
+        "書店", "BOOK", "紀伊国屋", "丸善", "ジュンク堂", "Amazon Kindle",
+        "新聞", "日経", "朝日", "読売", "毎日", "産経", "雑誌",
+    ],
+    "支払手数料": [
+        "振込手数料", "事務手数料", "決済手数料", "送金手数料", "両替手数料",
+    ],
+    "広告宣伝費": [
+        "広告", "宣伝", "Google広告", "Yahoo広告", "Facebook広告", "Meta広告",
+        "Instagram広告", "X広告", "LINE広告",
+    ],
+    "保険料": [
+        "保険", "損保", "生命保険", "東京海上", "三井住友海上", "あいおい",
+    ],
+    "租税公課": [
+        "印紙", "収入印紙", "登録免許税", "固定資産税", "事業税", "消費税納付",
+    ],
+    "地代家賃": [
+        "家賃", "賃料", "テナント", "オフィス賃料", "駐車場代",
+    ],
 }
 
-# 高額判定の閾値(固定資産候補)
+# 高額判定の閾値(固定資産候補・要確認マーク用)
 HIGH_VALUE_THRESHOLD = 100000
 
 
@@ -62,8 +135,12 @@ def generate_journal(ocr_result: dict[str, Any], client_id: str = "client_a") ->
     config = _load_config()
     client_config = config.get("clients", {}).get(client_id, {})
 
-    # 1. 勘定科目を推定
-    account = _estimate_account(ocr_result, client_config)
+    # 1. 勘定科目を推定(config から飲食しきい値を取得)
+    journal_rules = config.get("journal_rules", {})
+    entertainment_threshold = journal_rules.get(
+        "entertainment_amount_threshold", ENTERTAINMENT_AMOUNT_THRESHOLD
+    )
+    account = _estimate_account(ocr_result, client_config, entertainment_threshold)
 
     # 2. 税区分を判定
     tax_rate = ocr_result.get("tax_rate") or 10
@@ -113,20 +190,48 @@ def _load_config() -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _estimate_account(ocr_result: dict[str, Any], client_config: dict[str, Any]) -> str:
-    """勘定科目をキーワードベースで推定"""
+def _estimate_account(
+    ocr_result: dict[str, Any],
+    client_config: dict[str, Any],
+    entertainment_threshold: int = ENTERTAINMENT_AMOUNT_THRESHOLD,
+) -> str:
+    """
+    勘定科目をキーワード+金額ベースで推定する。
+
+    判定優先順位:
+    1. 軽食系(弁当・カフェ・牛丼・コンビニ等) → 常に「会議費」
+    2. 会食系(居酒屋・レストラン・料亭等)
+       - しきい値以下 → 「会議費」
+       - しきい値超 → 「接待交際費」(令和6年税制改正準拠)
+    3. その他カテゴリ(交通費・通信費等) → キーワードマッチ
+    4. マッチなし → デフォルト(消耗品費)
+    """
     text_blob = " ".join([
         str(ocr_result.get("vendor") or ""),
         " ".join(item.get("description", "") for item in ocr_result.get("items", [])),
         str(ocr_result.get("notes") or ""),
     ]).lower()
+    amount = ocr_result.get("total_amount") or 0
 
+    # 1. 軽食系 → 常に会議費
+    for kw in LIGHT_FOOD_KEYWORDS:
+        if kw.lower() in text_blob:
+            return "会議費"
+
+    # 2. 会食系 → 金額で会議費 or 接待交際費
+    for kw in DINING_KEYWORDS:
+        if kw.lower() in text_blob:
+            if amount > entertainment_threshold:
+                return "接待交際費"
+            return "会議費"
+
+    # 3. その他カテゴリのキーワードマッチ
     for account, keywords in ACCOUNT_KEYWORDS.items():
         for kw in keywords:
             if kw.lower() in text_blob:
                 return account
 
-    # マッチしなければデフォルト
+    # 4. デフォルト
     return client_config.get("accounts", {}).get("default_expense", "消耗品費")
 
 

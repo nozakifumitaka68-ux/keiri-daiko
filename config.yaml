@@ -27,6 +27,9 @@ journal_rules:
   high_value_threshold: 100000
   # デフォルト税区分
   default_tax_rate: 10
+  # 飲食代の会議費⇄接待交際費しきい値(円・1取引)
+  # 令和6年4月以降の税制改正準拠(1人当たり10,000円)
+  entertainment_amount_threshold: 10000
   # 支払方法判定
   payment_methods:
     - cash       # 現金
