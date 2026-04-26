@@ -26,6 +26,9 @@ from core.matcher import run_bank_matching, run_matching
 from core.mf_client import get_mf_client
 from core.pipeline import process_receipt
 from core.storage import (
+    delete_bank_statement,
+    delete_card_statement,
+    delete_entry,
     find_bank_statements_by_client,
     find_card_statements_by_client,
     find_pending_receipts,
@@ -33,7 +36,16 @@ from core.storage import (
     find_unsettled_card_statements,
     load_bank_statements,
     load_card_statements,
+    load_deleted_bank_statements,
+    load_deleted_card_statements,
+    load_deleted_history,
     load_history,
+    restore_bank_statement,
+    restore_card_statement,
+    restore_entry,
+    update_bank_statement,
+    update_card_statement,
+    update_entry,
 )
 
 load_dotenv()
@@ -318,6 +330,16 @@ config = load_config()
 # ===================================
 # ヘルパ
 # ===================================
+def _status_label(status: str | None) -> str:
+    """仕訳の支払区分ラベル(共通)"""
+    return {
+        "cash_pending": "💴 現金(突合待)",
+        "card_matched": "💳 カード払",
+        "cash_confirmed": "💴 現金確定",
+        "settlement": "🏦 取り崩し",
+    }.get(status or "", status or "")
+
+
 def _detect_ocr_engine() -> str:
     """現在のOCRエンジンを判定(サイドバー表示用)"""
     explicit = (os.getenv("OCR_ENGINE") or "").lower().strip()
@@ -866,20 +888,97 @@ def render_card_tab(state: dict[str, Any]) -> None:
         st.info("まだ明細がありません。上のフォームからCSVをアップロードしてください。")
         return
 
-    df = pd.DataFrame([
-        {
-            "ID": s.get("id", "")[:8],
-            "状態": "✅ 突合済" if s.get("match_status") == "matched" else "⏳ 未突合",
-            "決済": "🏦 引落済" if s.get("settlement_status") == "settled" else "—",
-            "利用日": s.get("usage_date"),
-            "計上日": s.get("posting_date"),
-            "支払先": s.get("vendor_raw"),
-            "金額": s.get("amount"),
-            "カード": s.get("card_name"),
-        }
-        for s in all_statements[::-1]
-    ])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    view_mode = st.radio(
+        "表示形式",
+        options=["📋 一覧表(高速)", "✏ 編集・削除(個別操作)"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="card_view_mode",
+    )
+
+    if view_mode == "📋 一覧表(高速)":
+        df = pd.DataFrame([
+            {
+                "ID": s.get("id", "")[:8],
+                "状態": "✅ 突合済" if s.get("match_status") == "matched" else "⏳ 未突合",
+                "決済": "🏦 引落済" if s.get("settlement_status") == "settled" else "—",
+                "利用日": s.get("usage_date"),
+                "計上日": s.get("posting_date"),
+                "支払先": s.get("vendor_raw"),
+                "金額": s.get("amount"),
+                "カード": s.get("card_name"),
+            }
+            for s in all_statements[::-1]
+        ])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("各明細を展開して編集・削除できます")
+        for s in all_statements[::-1][:50]:
+            _render_card_row(s)
+        if len(all_statements) > 50:
+            st.info(f"50件まで表示中(全{len(all_statements)}件)")
+
+
+def _render_card_row(s: dict[str, Any]) -> None:
+    """個別カード明細の編集・削除UI"""
+    sid = s.get("id", "")
+    short = sid[:8]
+    title = (
+        f"💳 {s.get('vendor_raw', '—')[:30]}  ¥{s.get('amount') or 0:,}  "
+        f"·  {s.get('usage_date')}  ·  {short}"
+    )
+    with st.expander(title, expanded=False):
+        col_l, col_r = st.columns([3, 2])
+        with col_l:
+            with st.form(key=f"edit_card_{sid}"):
+                st.markdown("**✏ 編集**")
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    new_usage = st.text_input("利用日", value=s.get("usage_date", "") or "", key=f"c_usage_{sid}")
+                    new_posting = st.text_input("計上日", value=s.get("posting_date", "") or "", key=f"c_posting_{sid}")
+                    new_vendor = st.text_input("支払先", value=s.get("vendor_raw", "") or "", key=f"c_vendor_{sid}")
+                with ec2:
+                    new_amount = st.number_input("金額", value=int(s.get("amount") or 0), step=1, key=f"c_amount_{sid}")
+                    new_card = st.text_input("カード名", value=s.get("card_name", "") or "", key=f"c_card_{sid}")
+                    new_memo = st.text_input("備考", value=s.get("memo", "") or "", key=f"c_memo_{sid}")
+
+                if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                    update_card_statement(sid, {
+                        "usage_date": new_usage,
+                        "posting_date": new_posting,
+                        "vendor_raw": new_vendor,
+                        "amount": new_amount,
+                        "card_name": new_card,
+                        "memo": new_memo,
+                    })
+                    st.success("✅ 保存しました")
+                    st.rerun()
+
+        with col_r:
+            st.markdown("**🗑 削除**")
+            confirm_key = f"c_confirm_del_{sid}"
+            if st.session_state.get(confirm_key):
+                st.warning("本当に削除しますか?")
+                d1, d2 = st.columns(2)
+                with d1:
+                    if st.button("✅ 削除する", key=f"c_do_del_{sid}", type="primary", use_container_width=True):
+                        delete_card_statement(sid, reason="ユーザー操作")
+                        st.session_state[confirm_key] = False
+                        st.success("ゴミ箱に移動しました")
+                        st.rerun()
+                with d2:
+                    if st.button("キャンセル", key=f"c_cancel_del_{sid}", use_container_width=True):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+            else:
+                if st.button("🗑 削除", key=f"c_del_{sid}", use_container_width=True):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+
+            if s.get("match_status") == "matched":
+                st.info(f"📎 仕訳ID: {(s.get('matched_journal_id') or '')[:8]} と紐付き済")
+            if s.get("settlement_status") == "settled":
+                st.info("🏦 銀行引落で決済済")
 
 
 # ===================================
@@ -1045,19 +1144,98 @@ def render_bank_tab(state: dict[str, Any]) -> None:
         st.info("まだ銀行明細がありません。上のフォームからCSVをアップロードしてください。")
         return
 
-    df = pd.DataFrame([
-        {
-            "ID": b.get("id", "")[:8],
-            "状態": _bank_status_label(b.get("match_status")),
-            "取引日": b.get("transaction_date"),
-            "摘要": b.get("description"),
-            "金額": b.get("amount"),
-            "残高": b.get("balance"),
-            "口座": b.get("account_name"),
-        }
-        for b in all_bank[::-1]
-    ])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    view_mode = st.radio(
+        "表示形式",
+        options=["📋 一覧表(高速)", "✏ 編集・削除(個別操作)"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="bank_view_mode",
+    )
+
+    if view_mode == "📋 一覧表(高速)":
+        df = pd.DataFrame([
+            {
+                "ID": b.get("id", "")[:8],
+                "状態": _bank_status_label(b.get("match_status")),
+                "取引日": b.get("transaction_date"),
+                "摘要": b.get("description"),
+                "金額": b.get("amount"),
+                "残高": b.get("balance"),
+                "口座": b.get("account_name"),
+            }
+            for b in all_bank[::-1]
+        ])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("各明細を展開して編集・削除できます")
+        for b in all_bank[::-1][:50]:
+            _render_bank_row(b)
+        if len(all_bank) > 50:
+            st.info(f"50件まで表示中(全{len(all_bank)}件)")
+
+
+def _render_bank_row(b: dict[str, Any]) -> None:
+    """個別銀行明細の編集・削除UI"""
+    bid = b.get("id", "")
+    short = bid[:8]
+    sign = "+" if (b.get("amount") or 0) > 0 else ""
+    title = (
+        f"🏦 {b.get('description', '—')[:30]}  {sign}¥{b.get('amount') or 0:,}  "
+        f"·  {b.get('transaction_date')}  ·  {short}"
+    )
+    with st.expander(title, expanded=False):
+        col_l, col_r = st.columns([3, 2])
+        with col_l:
+            with st.form(key=f"edit_bank_{bid}"):
+                st.markdown("**✏ 編集**")
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    new_date = st.text_input("取引日", value=b.get("transaction_date", "") or "", key=f"b_date_{bid}")
+                    new_desc = st.text_input("摘要", value=b.get("description", "") or "", key=f"b_desc_{bid}")
+                    new_amount = st.number_input(
+                        "金額(出金=負)", value=int(b.get("amount") or 0), step=1, key=f"b_amount_{bid}",
+                    )
+                with ec2:
+                    new_account = st.text_input("口座名", value=b.get("account_name", "") or "", key=f"b_account_{bid}")
+                    cur_balance = b.get("balance")
+                    new_balance = st.number_input(
+                        "残高", value=int(cur_balance) if cur_balance is not None else 0, step=1, key=f"b_balance_{bid}",
+                    )
+
+                if st.form_submit_button("💾 保存", type="primary", use_container_width=True):
+                    update_bank_statement(bid, {
+                        "transaction_date": new_date,
+                        "description": new_desc,
+                        "amount": new_amount,
+                        "account_name": new_account,
+                        "balance": new_balance,
+                    })
+                    st.success("✅ 保存しました")
+                    st.rerun()
+
+        with col_r:
+            st.markdown("**🗑 削除**")
+            confirm_key = f"b_confirm_del_{bid}"
+            if st.session_state.get(confirm_key):
+                st.warning("本当に削除しますか?")
+                d1, d2 = st.columns(2)
+                with d1:
+                    if st.button("✅ 削除する", key=f"b_do_del_{bid}", type="primary", use_container_width=True):
+                        delete_bank_statement(bid, reason="ユーザー操作")
+                        st.session_state[confirm_key] = False
+                        st.success("ゴミ箱に移動しました")
+                        st.rerun()
+                with d2:
+                    if st.button("キャンセル", key=f"b_cancel_del_{bid}", use_container_width=True):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+            else:
+                if st.button("🗑 削除", key=f"b_del_{bid}", use_container_width=True):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+
+            if b.get("match_status") == "matched_card_payment":
+                st.info("💳 カード引落として突合済")
 
 
 def _bank_status_label(status: str | None) -> str:
@@ -1227,33 +1405,247 @@ def render_history_tab(state: dict[str, Any]) -> None:
     if status_filter:
         filtered = [h for h in filtered if h.get("match_status") in status_filter]
 
-    def _status_label(status: str | None) -> str:
-        return {
-            "cash_pending": "💴 現金",
-            "card_matched": "💳 カード払",
-            "cash_confirmed": "💴 現金確定",
-            "settlement": "🏦 取り崩し",
-        }.get(status or "", status or "")
+    # 表示モード切替
+    view_mode = st.radio(
+        "表示形式",
+        options=["📋 一覧表(高速)", "✏ 編集・削除(個別操作)"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-    df = pd.DataFrame([
-        {
-            "ID": h.get("id", "")[:8],
-            "登録日": (h.get("created_at") or "")[:19].replace("T", " "),
-            "取引日": h.get("transaction_date"),
-            "支払先": h.get("vendor"),
-            "借方": h.get("debit"),
-            "貸方": h.get("credit"),
-            "金額": h.get("amount"),
-            "税率": f"{h.get('tax_rate') or '—'}%" if h.get("tax_rate") else "—",
-            "支払区分": _status_label(h.get("match_status")),
-            "要確認": "⚠" if h.get("needs_review") else "✓",
-        }
-        for h in filtered[::-1]
+    if view_mode == "📋 一覧表(高速)":
+        df = pd.DataFrame([
+            {
+                "ID": h.get("id", "")[:8],
+                "登録日": (h.get("created_at") or "")[:19].replace("T", " "),
+                "取引日": h.get("transaction_date"),
+                "支払先": h.get("vendor"),
+                "借方": h.get("debit"),
+                "貸方": h.get("credit"),
+                "金額": h.get("amount"),
+                "税率": f"{h.get('tax_rate') or '—'}%" if h.get("tax_rate") else "—",
+                "支払区分": _status_label(h.get("match_status")),
+                "要確認": "⚠" if h.get("needs_review") else "✓",
+            }
+            for h in filtered[::-1]
+        ])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        with st.expander("🔍 履歴の生データを見る(JSON)"):
+            st.json(filtered[::-1])
+    else:
+        # 個別編集・削除モード
+        st.caption("各仕訳を展開して編集・削除できます")
+        for h in filtered[::-1][:50]:  # 表示は最新50件まで(パフォーマンス対策)
+            _render_journal_row(h)
+        if len(filtered) > 50:
+            st.info(f"50件まで表示中(全{len(filtered)}件)。フィルタで絞り込んでください")
+
+
+def _render_journal_row(h: dict[str, Any]) -> None:
+    """個別仕訳の編集・削除UI"""
+    entry_id = h.get("id", "")
+    short_id = entry_id[:8]
+    vendor = h.get("vendor") or "—"
+    amount = h.get("amount") or 0
+    badge = status_badge(h.get("match_status"), kind="journal")
+
+    title = f"📄 {vendor[:30]}  ¥{amount:,}  ·  {h.get('transaction_date')}  ·  {short_id}"
+
+    with st.expander(title, expanded=False):
+        st.markdown(badge, unsafe_allow_html=True)
+
+        col_l, col_r = st.columns([3, 2])
+        with col_l:
+            with st.form(key=f"edit_journal_{entry_id}"):
+                st.markdown("**✏ 編集**")
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    new_date = st.text_input("日付", value=h.get("transaction_date", ""), key=f"j_date_{entry_id}")
+                    new_vendor = st.text_input("支払先", value=h.get("vendor", "") or "", key=f"j_vendor_{entry_id}")
+                    new_amount = st.number_input("金額", value=int(h.get("amount") or 0), step=1, key=f"j_amount_{entry_id}")
+                    new_debit = st.text_input("借方", value=h.get("debit", "") or "", key=f"j_debit_{entry_id}")
+                with ec2:
+                    new_credit = st.text_input("貸方", value=h.get("credit", "") or "", key=f"j_credit_{entry_id}")
+                    tax_options = [10, 8, 0]
+                    cur_tax = h.get("tax_rate") or 10
+                    new_tax = st.selectbox(
+                        "税率(%)",
+                        options=tax_options,
+                        index=tax_options.index(cur_tax) if cur_tax in tax_options else 0,
+                        key=f"j_tax_{entry_id}",
+                    )
+                    new_desc = st.text_input("摘要", value=h.get("description", "") or "", key=f"j_desc_{entry_id}")
+                    status_options = ["cash_pending", "card_matched", "cash_confirmed", "settlement"]
+                    cur_status = h.get("match_status") or "cash_pending"
+                    new_status = st.selectbox(
+                        "支払区分",
+                        options=status_options,
+                        index=status_options.index(cur_status) if cur_status in status_options else 0,
+                        format_func=_status_label,
+                        key=f"j_status_{entry_id}",
+                    )
+
+                save = st.form_submit_button("💾 保存", type="primary", use_container_width=True)
+                if save:
+                    update_entry(entry_id, {
+                        "transaction_date": new_date,
+                        "vendor": new_vendor,
+                        "amount": new_amount,
+                        "debit": new_debit,
+                        "credit": new_credit,
+                        "tax_rate": new_tax,
+                        "description": new_desc,
+                        "match_status": new_status,
+                    })
+                    st.success("✅ 保存しました")
+                    st.rerun()
+
+        with col_r:
+            st.markdown("**🗑 削除**")
+            confirm_key = f"j_confirm_del_{entry_id}"
+            if st.session_state.get(confirm_key):
+                st.warning("本当に削除しますか?(ゴミ箱から復元可能)")
+                d1, d2 = st.columns(2)
+                with d1:
+                    if st.button("✅ 削除する", key=f"j_do_del_{entry_id}", type="primary", use_container_width=True):
+                        delete_entry(entry_id, reason="ユーザー操作")
+                        st.session_state[confirm_key] = False
+                        st.success("ゴミ箱に移動しました")
+                        st.rerun()
+                with d2:
+                    if st.button("キャンセル", key=f"j_cancel_del_{entry_id}", use_container_width=True):
+                        st.session_state[confirm_key] = False
+                        st.rerun()
+            else:
+                if st.button("🗑 削除", key=f"j_del_{entry_id}", use_container_width=True):
+                    st.session_state[confirm_key] = True
+                    st.rerun()
+
+            if h.get("needs_review"):
+                st.info("⚠ 要確認: " + " / ".join(h.get("review_reasons", [])))
+
+
+# ===================================
+# タブ8: ゴミ箱(削除済データの復元)
+# ===================================
+def render_trash_tab(state: dict[str, Any]) -> None:
+    st.subheader("🗑 ゴミ箱")
+    st.caption(
+        "削除した仕訳・カード明細・銀行明細はここに保管されます。"
+        "復元ボタンで元に戻せます。"
+    )
+
+    deleted_journals = [
+        h for h in load_deleted_history() if h.get("client_id") == state["client_id"]
+    ]
+    deleted_cards = [
+        s for s in load_deleted_card_statements() if s.get("client_id") == state["client_id"]
+    ]
+    deleted_bank = [
+        b for b in load_deleted_bank_statements() if b.get("client_id") == state["client_id"]
+    ]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_with_delta("削除済 仕訳", len(deleted_journals))
+    with c2:
+        metric_with_delta("削除済 カード明細", len(deleted_cards))
+    with c3:
+        metric_with_delta("削除済 銀行明細", len(deleted_bank))
+
+    if not (deleted_journals or deleted_cards or deleted_bank):
+        st.info("ゴミ箱は空です")
+        return
+
+    st.divider()
+    sub_tabs = st.tabs([
+        f"📄 仕訳({len(deleted_journals)})",
+        f"💳 カード明細({len(deleted_cards)})",
+        f"🏦 銀行明細({len(deleted_bank)})",
     ])
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with st.expander("🔍 履歴の生データを見る(JSON)"):
-        st.json(filtered[::-1])
+    with sub_tabs[0]:
+        if not deleted_journals:
+            st.success("削除済の仕訳はありません")
+        for h in deleted_journals[::-1]:
+            _render_trash_row_journal(h)
+
+    with sub_tabs[1]:
+        if not deleted_cards:
+            st.success("削除済のカード明細はありません")
+        for s in deleted_cards[::-1]:
+            _render_trash_row_card(s)
+
+    with sub_tabs[2]:
+        if not deleted_bank:
+            st.success("削除済の銀行明細はありません")
+        for b in deleted_bank[::-1]:
+            _render_trash_row_bank(b)
+
+
+def _render_trash_row_journal(h: dict[str, Any]) -> None:
+    eid = h.get("id", "")
+    deleted_at = (h.get("deleted_at") or "")[:19].replace("T", " ")
+    title = (
+        f"📄 {h.get('vendor', '—')[:30]}  ¥{h.get('amount') or 0:,}  ·  "
+        f"削除: {deleted_at}"
+    )
+    with st.expander(title, expanded=False):
+        col_l, col_r = st.columns([3, 1])
+        with col_l:
+            st.write(f"**取引日**: {h.get('transaction_date')}")
+            st.write(f"**借方**: {h.get('debit')} / **貸方**: {h.get('credit')}")
+            st.write(f"**摘要**: {h.get('description', '')}")
+            if h.get("delete_reason"):
+                st.caption(f"削除理由: {h['delete_reason']}")
+        with col_r:
+            if st.button("♻ 復元", key=f"restore_j_{eid}", type="primary", use_container_width=True):
+                restore_entry(eid)
+                st.success("✅ 復元しました")
+                st.rerun()
+
+
+def _render_trash_row_card(s: dict[str, Any]) -> None:
+    sid = s.get("id", "")
+    deleted_at = (s.get("deleted_at") or "")[:19].replace("T", " ")
+    title = (
+        f"💳 {s.get('vendor_raw', '—')[:30]}  ¥{s.get('amount') or 0:,}  ·  "
+        f"削除: {deleted_at}"
+    )
+    with st.expander(title, expanded=False):
+        col_l, col_r = st.columns([3, 1])
+        with col_l:
+            st.write(f"**利用日**: {s.get('usage_date')}")
+            st.write(f"**カード**: {s.get('card_name', '—')}")
+            if s.get("delete_reason"):
+                st.caption(f"削除理由: {s['delete_reason']}")
+        with col_r:
+            if st.button("♻ 復元", key=f"restore_c_{sid}", type="primary", use_container_width=True):
+                restore_card_statement(sid)
+                st.success("✅ 復元しました")
+                st.rerun()
+
+
+def _render_trash_row_bank(b: dict[str, Any]) -> None:
+    bid = b.get("id", "")
+    deleted_at = (b.get("deleted_at") or "")[:19].replace("T", " ")
+    title = (
+        f"🏦 {b.get('description', '—')[:30]}  ¥{b.get('amount') or 0:,}  ·  "
+        f"削除: {deleted_at}"
+    )
+    with st.expander(title, expanded=False):
+        col_l, col_r = st.columns([3, 1])
+        with col_l:
+            st.write(f"**取引日**: {b.get('transaction_date')}")
+            st.write(f"**口座**: {b.get('account_name', '—')}")
+            if b.get("delete_reason"):
+                st.caption(f"削除理由: {b['delete_reason']}")
+        with col_r:
+            if st.button("♻ 復元", key=f"restore_b_{bid}", type="primary", use_container_width=True):
+                restore_bank_statement(bid)
+                st.success("✅ 復元しました")
+                st.rerun()
 
 
 # ===================================
@@ -1299,6 +1691,7 @@ def main() -> None:
         "🏦 銀行明細",
         "💸 引落突合",
         "📚 仕訳台帳",
+        "🗑 ゴミ箱",
     ])
     with tabs[0]:
         render_dashboard(state)
@@ -1316,6 +1709,8 @@ def main() -> None:
         render_bank_match_tab(state)
     with tabs[7]:
         render_history_tab(state)
+    with tabs[8]:
+        render_trash_tab(state)
 
 
 if __name__ == "__main__":

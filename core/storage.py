@@ -56,10 +56,24 @@ def init_storage() -> None:
         _write_json(BANK_STATEMENTS_PATH, [])
 
 
-def load_history() -> list[dict[str, Any]]:
-    """全仕訳履歴を読込"""
+def load_history(include_deleted: bool = False) -> list[dict[str, Any]]:
+    """
+    仕訳履歴を読込。
+    Args:
+        include_deleted: True なら削除済も含める(ゴミ箱表示用)
+    """
     init_storage()
-    return _read_json(HISTORY_PATH, [])
+    history = _read_json(HISTORY_PATH, [])
+    if include_deleted:
+        return history
+    return [h for h in history if not h.get("is_deleted")]
+
+
+def load_deleted_history() -> list[dict[str, Any]]:
+    """削除済の仕訳のみを読込(ゴミ箱用)"""
+    init_storage()
+    history = _read_json(HISTORY_PATH, [])
+    return [h for h in history if h.get("is_deleted")]
 
 
 def save_entry(entry: dict[str, Any]) -> dict[str, Any]:
@@ -78,7 +92,7 @@ def save_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def update_entry(entry_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
     """既存仕訳を更新"""
-    history = load_history()
+    history = load_history(include_deleted=True)
     for i, e in enumerate(history):
         if e.get("id") == entry_id:
             history[i] = {**e, **updates, "updated_at": datetime.now().isoformat()}
@@ -87,13 +101,45 @@ def update_entry(entry_id: str, updates: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def find_by_client(client_id: str) -> list[dict[str, Any]]:
+def delete_entry(entry_id: str, reason: str = "") -> dict[str, Any] | None:
+    """仕訳をソフト削除(復元可能)"""
+    return update_entry(entry_id, {
+        "is_deleted": True,
+        "deleted_at": datetime.now().isoformat(),
+        "delete_reason": reason,
+    })
+
+
+def restore_entry(entry_id: str) -> dict[str, Any] | None:
+    """削除済仕訳を復元"""
+    return update_entry(entry_id, {
+        "is_deleted": False,
+        "deleted_at": None,
+        "delete_reason": None,
+        "restored_at": datetime.now().isoformat(),
+    })
+
+
+def hard_delete_entry(entry_id: str) -> bool:
+    """物理削除(完全消去・復元不可)。慎重に使うこと"""
+    history = load_history(include_deleted=True)
+    new_history = [e for e in history if e.get("id") != entry_id]
+    if len(new_history) == len(history):
+        return False
+    _write_json(HISTORY_PATH, new_history)
+    return True
+
+
+def find_by_client(client_id: str, include_deleted: bool = False) -> list[dict[str, Any]]:
     """指定クライアントの仕訳のみ抽出"""
-    return [e for e in load_history() if e.get("client_id") == client_id]
+    return [
+        e for e in load_history(include_deleted=include_deleted)
+        if e.get("client_id") == client_id
+    ]
 
 
 def find_pending_receipts(client_id: str) -> list[dict[str, Any]]:
-    """突合待ち(cash_pending)の仕訳のみ抽出"""
+    """突合待ち(cash_pending)の仕訳のみ抽出(削除済は除外)"""
     return [
         e for e in find_by_client(client_id)
         if e.get("match_status") == "cash_pending"
@@ -122,10 +168,20 @@ def update_journal_match(
 # カード利用明細
 # ===================================
 
-def load_card_statements() -> list[dict[str, Any]]:
-    """全カード明細を読込"""
+def load_card_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
+    """カード明細を読込"""
     init_storage()
-    return _read_json(CARD_STATEMENTS_PATH, [])
+    statements = _read_json(CARD_STATEMENTS_PATH, [])
+    if include_deleted:
+        return statements
+    return [s for s in statements if not s.get("is_deleted")]
+
+
+def load_deleted_card_statements() -> list[dict[str, Any]]:
+    """削除済のカード明細のみ"""
+    init_storage()
+    statements = _read_json(CARD_STATEMENTS_PATH, [])
+    return [s for s in statements if s.get("is_deleted")]
 
 
 def save_card_statement(statement: dict[str, Any]) -> dict[str, Any]:
@@ -154,13 +210,32 @@ def update_card_statement(
     updates: dict[str, Any],
 ) -> dict[str, Any] | None:
     """カード明細を更新"""
-    statements = load_card_statements()
+    statements = load_card_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
             statements[i] = {**s, **updates, "updated_at": datetime.now().isoformat()}
             _write_json(CARD_STATEMENTS_PATH, statements)
             return statements[i]
     return None
+
+
+def delete_card_statement(statement_id: str, reason: str = "") -> dict[str, Any] | None:
+    """カード明細をソフト削除"""
+    return update_card_statement(statement_id, {
+        "is_deleted": True,
+        "deleted_at": datetime.now().isoformat(),
+        "delete_reason": reason,
+    })
+
+
+def restore_card_statement(statement_id: str) -> dict[str, Any] | None:
+    """削除済カード明細を復元"""
+    return update_card_statement(statement_id, {
+        "is_deleted": False,
+        "deleted_at": None,
+        "delete_reason": None,
+        "restored_at": datetime.now().isoformat(),
+    })
 
 
 def find_unmatched_card_statements(client_id: str | None = None) -> list[dict[str, Any]]:
@@ -181,10 +256,20 @@ def find_card_statements_by_client(client_id: str) -> list[dict[str, Any]]:
 # 銀行明細
 # ===================================
 
-def load_bank_statements() -> list[dict[str, Any]]:
-    """全銀行明細を読込"""
+def load_bank_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
+    """銀行明細を読込"""
     init_storage()
-    return _read_json(BANK_STATEMENTS_PATH, [])
+    statements = _read_json(BANK_STATEMENTS_PATH, [])
+    if include_deleted:
+        return statements
+    return [s for s in statements if not s.get("is_deleted")]
+
+
+def load_deleted_bank_statements() -> list[dict[str, Any]]:
+    """削除済の銀行明細のみ"""
+    init_storage()
+    statements = _read_json(BANK_STATEMENTS_PATH, [])
+    return [s for s in statements if s.get("is_deleted")]
 
 
 def save_bank_statement(statement: dict[str, Any]) -> dict[str, Any]:
@@ -214,13 +299,32 @@ def update_bank_statement(
     updates: dict[str, Any],
 ) -> dict[str, Any] | None:
     """銀行明細を更新"""
-    statements = load_bank_statements()
+    statements = load_bank_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
             statements[i] = {**s, **updates, "updated_at": datetime.now().isoformat()}
             _write_json(BANK_STATEMENTS_PATH, statements)
             return statements[i]
     return None
+
+
+def delete_bank_statement(statement_id: str, reason: str = "") -> dict[str, Any] | None:
+    """銀行明細をソフト削除"""
+    return update_bank_statement(statement_id, {
+        "is_deleted": True,
+        "deleted_at": datetime.now().isoformat(),
+        "delete_reason": reason,
+    })
+
+
+def restore_bank_statement(statement_id: str) -> dict[str, Any] | None:
+    """削除済銀行明細を復元"""
+    return update_bank_statement(statement_id, {
+        "is_deleted": False,
+        "deleted_at": None,
+        "delete_reason": None,
+        "restored_at": datetime.now().isoformat(),
+    })
 
 
 def find_bank_statements_by_client(client_id: str) -> list[dict[str, Any]]:
