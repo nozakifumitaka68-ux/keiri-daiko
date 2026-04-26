@@ -34,6 +34,8 @@ from core.storage import (
     find_pending_receipts,
     find_unmatched_bank_payments,
     find_unsettled_card_statements,
+    get_receipt_image_bytes,
+    get_receipt_image_path,
     load_bank_statements,
     load_card_statements,
     load_deleted_bank_statements,
@@ -699,6 +701,8 @@ def render_upload_tab(state: dict[str, Any]) -> None:
                     archive=False,
                     skip_duplicates=True,
                     force_register=force_register,
+                    save_image=True,
+                    original_filename=uf.name,
                 )
                 result["original_name"] = uf.name
                 results.append(result)
@@ -1519,6 +1523,45 @@ def _render_journal_row(h: dict[str, Any]) -> None:
 
             if h.get("needs_review"):
                 st.info("⚠ 要確認: " + " / ".join(h.get("review_reasons", [])))
+
+        # 領収書原本プレビュー
+        receipt_path = h.get("receipt_path")
+        receipt_filename = h.get("receipt_filename") or "領収書"
+        if receipt_path:
+            full_path = get_receipt_image_path(receipt_path)
+            if full_path and full_path.exists():
+                ext = full_path.suffix.lower()
+                with st.expander(f"📎 領収書原本({receipt_filename})", expanded=False):
+                    img_col, btn_col = st.columns([3, 1])
+                    with img_col:
+                        if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                            st.image(str(full_path), use_container_width=True)
+                        elif ext == ".pdf":
+                            try:
+                                from pdf2image import convert_from_path
+                                images = convert_from_path(
+                                    str(full_path), first_page=1, last_page=1, dpi=150
+                                )
+                                if images:
+                                    st.image(images[0], use_container_width=True)
+                                    st.caption("(PDF 1ページ目をプレビュー表示)")
+                            except Exception as e:
+                                st.warning(f"PDFプレビュー失敗: {e}")
+                        else:
+                            st.info(f"プレビュー非対応の形式: {ext}")
+                    with btn_col:
+                        with open(full_path, "rb") as f:
+                            data = f.read()
+                        st.download_button(
+                            "📥 ダウンロード",
+                            data=data,
+                            file_name=receipt_filename,
+                            use_container_width=True,
+                            key=f"dl_{entry_id}",
+                        )
+                        st.caption(f"📦 {len(data) / 1024:.1f} KB")
+            else:
+                st.caption("📎 領収書ファイルが見つかりません(再起動等で消失した可能性)")
 
         # OCR raw 参照(エキスパンドで折りたたみ)
         ocr_raw = h.get("ocr_raw")

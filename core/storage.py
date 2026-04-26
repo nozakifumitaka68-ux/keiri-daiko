@@ -18,6 +18,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 HISTORY_PATH = DATA_DIR / "history.json"
 CARD_STATEMENTS_PATH = DATA_DIR / "card_statements.json"
 BANK_STATEMENTS_PATH = DATA_DIR / "bank_statements.json"
+RECEIPTS_DIR = DATA_DIR / "receipts"
 
 
 # ===================================
@@ -368,6 +369,67 @@ def find_unsettled_card_statements(client_id: str, card_name: str | None = None)
     if card_name:
         statements = [s for s in statements if s.get("card_name") == card_name]
     return statements
+
+
+# ===================================
+# 領収書画像の保管・取得
+# ===================================
+
+def save_receipt_image(
+    file_bytes: bytes,
+    client_id: str,
+    file_hash: str,
+    original_filename: str,
+) -> str:
+    """
+    領収書画像をローカルストレージに保存する。
+
+    保存先: data/receipts/<client_id>/<file_hash>.<ext>
+    ファイル名はハッシュなので、同じファイルなら自動的に重複排除される。
+
+    Args:
+        file_bytes: 画像のバイト列
+        client_id: クライアントID
+        file_hash: SHA-256ハッシュ(ファイル名に使う)
+        original_filename: 元のファイル名(拡張子取得用)
+    Returns:
+        保存先の相対パス(data/receipts/<client>/<hash>.<ext>)
+    """
+    # 拡張子を元ファイル名から取得
+    ext = Path(original_filename).suffix.lower()
+    if not ext:
+        ext = ".bin"  # フォールバック
+
+    save_dir = RECEIPTS_DIR / client_id
+    save_dir.mkdir(parents=True, exist_ok=True)
+    save_path = save_dir / f"{file_hash}{ext}"
+
+    # 既存ファイルがあれば書き込みスキップ(ハッシュ一致 = 内容一致)
+    if not save_path.exists():
+        with open(save_path, "wb") as f:
+            f.write(file_bytes)
+
+    # 相対パスで返す(JSON保存・移植性のため)
+    return str(save_path.relative_to(DATA_DIR.parent)).replace("\\", "/")
+
+
+def get_receipt_image_bytes(receipt_path: str) -> bytes | None:
+    """保存済の領収書画像をバイト列で取得"""
+    if not receipt_path:
+        return None
+    full_path = DATA_DIR.parent / receipt_path
+    if not full_path.exists():
+        return None
+    with open(full_path, "rb") as f:
+        return f.read()
+
+
+def get_receipt_image_path(receipt_path: str) -> Path | None:
+    """保存済の領収書画像の絶対パスを返す"""
+    if not receipt_path:
+        return None
+    full_path = DATA_DIR.parent / receipt_path
+    return full_path if full_path.exists() else None
 
 
 # CLIテスト用

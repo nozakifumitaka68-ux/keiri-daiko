@@ -18,6 +18,7 @@ from .duplicate import calculate_file_hash_from_path, find_duplicate_receipts
 from .journal import generate_journal
 from .mf_client import get_mf_client
 from .ocr import extract_receipt
+from .storage import save_receipt_image
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ def process_receipt(
     archive: bool = False,
     skip_duplicates: bool = True,
     force_register: bool = False,
+    save_image: bool = True,
+    original_filename: str | None = None,
 ) -> dict[str, Any]:
     """
     領収書1枚を処理する。
@@ -40,6 +43,8 @@ def process_receipt(
         archive: True なら処理後に data/processed/ へ移動
         skip_duplicates: True なら既存の重複(ハッシュ一致or取引データ一致)を検出してスキップ
         force_register: True なら重複検出されても強制登録
+        save_image: True なら領収書画像を data/receipts/ に保存
+        original_filename: ユーザーがアップロードした元ファイル名(拡張子取得用)
 
     Returns:
         {
@@ -48,12 +53,27 @@ def process_receipt(
           "journal": ...,
           "registration": ...,
           "duplicate_info": {...},  # 重複検出時のみ
+          "receipt_path": ...,  # 保存先相対パス(save_image=True時)
         }
     """
     path = Path(file_path)
 
-    # 0. ファイルハッシュ計算
+    # 0. ファイルハッシュ計算 + 画像保存
     file_hash = calculate_file_hash_from_path(path) if path.exists() else None
+    receipt_path = None
+    if save_image and path.exists() and file_hash:
+        try:
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            display_name = original_filename or path.name
+            receipt_path = save_receipt_image(
+                file_bytes=file_bytes,
+                client_id=client_id,
+                file_hash=file_hash,
+                original_filename=display_name,
+            )
+        except Exception as e:
+            logger.warning(f"画像保存失敗(処理は続行): {e}")
 
     # 1. OCR
     logger.info(f"[OCR] {path}")
@@ -101,8 +121,10 @@ def process_receipt(
             "file_hash": file_hash,
         }
 
-    # 仕訳に file_hash を埋め込んで保存できるようにする
+    # 仕訳に file_hash と receipt_path を埋め込んで保存できるようにする
     journal["file_hash"] = file_hash
+    journal["receipt_path"] = receipt_path
+    journal["receipt_filename"] = original_filename or (path.name if path else None)
 
     # 4. 登録(オプション)
     registration = None
@@ -127,6 +149,7 @@ def process_receipt(
         "registration": registration,
         "duplicate_info": duplicate_info if duplicate_info["has_duplicate"] else None,
         "file_hash": file_hash,
+        "receipt_path": receipt_path,
     }
 
 
