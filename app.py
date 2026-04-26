@@ -646,7 +646,10 @@ def _render_activity_item(h: dict[str, Any]) -> None:
 # ===================================
 def render_upload_tab(state: dict[str, Any]) -> None:
     st.subheader("📤 領収書アップロード")
-    st.caption("複数の領収書(画像/PDF)を一度にアップロードして、AI読取・仕訳生成を行います。")
+    st.caption(
+        "複数の領収書(画像/PDF)をアップロードして、AI読取・仕訳生成を行います。"
+        "処理した仕訳は自動で保存され、「📚 仕訳台帳」タブで確認・編集できます。"
+    )
 
     uploaded_files = st.file_uploader(
         "領収書ファイルをドラッグ&ドロップ または ファイル選択",
@@ -655,19 +658,12 @@ def render_upload_tab(state: dict[str, Any]) -> None:
         key="upload_files",
     )
 
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        process_btn = st.button(
-            "🚀 処理開始",
-            type="primary",
-            disabled=not uploaded_files,
-            use_container_width=True,
-        )
-    with col2:
-        auto_register = st.checkbox(
-            "🔄 処理後すぐ仕訳を保存(モックモードでもhistory.jsonに保存)",
-            value=True,
-        )
+    process_btn = st.button(
+        "🚀 処理開始",
+        type="primary",
+        disabled=not uploaded_files,
+        use_container_width=False,
+    )
 
     if process_btn and uploaded_files:
         results = []
@@ -687,10 +683,11 @@ def render_upload_tab(state: dict[str, Any]) -> None:
                 tmp_path = tmp.name
 
             try:
+                # 仕訳は常に自動保存(編集・削除は仕訳台帳タブで実施)
                 result = process_receipt(
                     tmp_path,
                     client_id=state["client_id"],
-                    auto_register=auto_register,
+                    auto_register=True,
                     archive=False,
                 )
                 result["original_name"] = uf.name
@@ -700,128 +697,57 @@ def render_upload_tab(state: dict[str, Any]) -> None:
 
         progress.empty()
         st.session_state["last_results"] = results
-        st.success(f"✅ {len(results)}件の処理が完了しました。「📝 確認・編集」タブで内容を確認してください。")
 
+        ok_count = sum(1 for r in results if r.get("status") == "ok")
+        review_count = sum(
+            1 for r in results
+            if (r.get("journal") or {}).get("needs_review")
+        )
+
+        st.success(
+            f"✅ {len(results)}件の処理が完了しました。"
+            f"仕訳台帳に保存済みです。"
+        )
+        if review_count > 0:
+            st.warning(
+                f"⚠ {review_count}件は確認が必要です。"
+                f"「📚 仕訳台帳」タブで「要確認のみ」フィルタを使うと素早くチェックできます。"
+            )
+
+    # 直近の処理結果(セッション中のみ)
     if "last_results" in st.session_state and st.session_state["last_results"]:
         st.divider()
-        st.markdown("##### 直近の処理結果")
+        st.markdown("##### 📋 今のセッションでの処理結果")
+        st.caption("（リロードすると消えます。永続データは「📚 仕訳台帳」タブで確認してください）")
         results = st.session_state["last_results"]
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             metric_with_delta("処理件数", len(results))
         with c2:
             ok = sum(1 for r in results if r.get("status") == "ok")
             metric_with_delta("成功", ok)
         with c3:
+            review = sum(
+                1 for r in results
+                if (r.get("journal") or {}).get("needs_review")
+            )
+            metric_with_delta("⚠ 要確認", review)
+        with c4:
             total = sum((r.get("journal", {}) or {}).get("amount") or 0 for r in results)
             metric_with_delta("合計金額", f"¥{total:,}")
 
         summary_df = _to_summary_df(results)
         st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-
-# ===================================
-# タブ2: 確認・編集
-# ===================================
-def render_review_tab(state: dict[str, Any]) -> None:
-    st.subheader("📝 確認・編集")
-    st.caption("AI読取結果を確認し、必要なら修正してから仕訳を確定します。")
-
-    results = st.session_state.get("last_results", [])
-    if not results:
-        st.info("📤 アップロードタブから領収書を処理してください。")
-        return
-
-    for idx, result in enumerate(results):
-        ocr = result.get("ocr", {}) or {}
-        journal = result.get("journal", {}) or {}
-        original_name = result.get("original_name", f"file_{idx}")
-
-        title = (
-            f"📄 {original_name}  ·  "
-            f"{(journal.get('vendor') or '?')[:30]}  ·  "
-            f"¥{journal.get('amount') or 0:,}"
+        st.info(
+            "💡 修正・削除したい項目があれば、上部の「📚 仕訳台帳」タブを開き、"
+            "「✏ 編集・削除」モードに切り替えてください。"
         )
 
-        with st.expander(title, expanded=(idx == 0)):
-            if result.get("status") != "ok":
-                st.error(f"処理失敗: {result.get('status')}")
-                st.json(result)
-                continue
-
-            # ステータスバッジ
-            status = journal.get("match_status", "cash_pending")
-            st.markdown(status_badge(status), unsafe_allow_html=True)
-
-            if journal.get("needs_review"):
-                st.warning(
-                    "⚠ 確認必須: " + " / ".join(journal.get("review_reasons", []))
-                )
-
-            col1, col2 = st.columns([1, 1])
-            with col1:
-                st.markdown("**📋 仕訳情報(編集可能)**")
-                edited = _render_journal_editor(journal, idx)
-                results[idx]["journal"] = {**journal, **edited}
-
-            with col2:
-                st.markdown("**🔍 AI読取結果(参照)**")
-                clean = {k: v for k, v in ocr.items() if not k.startswith("_")}
-                st.json(clean)
-
-            registration = result.get("registration")
-            if registration:
-                st.success(
-                    f"✅ 登録済: ID={registration.get('id')} / {registration.get('message', '')}"
-                )
-            else:
-                if st.button(
-                    f"💾 仕訳を保存(#{idx + 1})",
-                    key=f"register_{idx}",
-                    type="primary",
-                ):
-                    client = get_mf_client()
-                    reg_result = client.post_journal(results[idx]["journal"])
-                    results[idx]["registration"] = reg_result
-                    st.session_state["last_results"] = results
-                    st.rerun()
-
-
-def _render_journal_editor(journal: dict[str, Any], idx: int) -> dict[str, Any]:
-    """仕訳情報の編集UI"""
-    edited = {}
-    edited["transaction_date"] = st.text_input(
-        "日付", value=journal.get("transaction_date", ""), key=f"date_{idx}",
-    )
-    edited["vendor"] = st.text_input(
-        "支払先", value=journal.get("vendor", "") or "", key=f"vendor_{idx}",
-    )
-    edited["amount"] = st.number_input(
-        "金額(円)", value=int(journal.get("amount") or 0), step=1, key=f"amount_{idx}",
-    )
-    edited["debit"] = st.text_input(
-        "借方科目", value=journal.get("debit", ""), key=f"debit_{idx}",
-    )
-    edited["credit"] = st.text_input(
-        "貸方科目", value=journal.get("credit", ""), key=f"credit_{idx}",
-    )
-    tax_rate_options = [10, 8, 0]
-    current_tax = journal.get("tax_rate") or 10
-    edited["tax_rate"] = st.selectbox(
-        "税率(%)",
-        options=tax_rate_options,
-        index=tax_rate_options.index(current_tax) if current_tax in tax_rate_options else 0,
-        key=f"tax_{idx}",
-    )
-    edited["description"] = st.text_input(
-        "摘要", value=journal.get("description", "") or "", key=f"desc_{idx}",
-    )
-    return edited
-
 
 # ===================================
-# タブ3: カード明細
+# タブ2: カード明細
 # ===================================
 def render_card_tab(state: dict[str, Any]) -> None:
     st.subheader("💳 カード利用明細")
@@ -1385,9 +1311,15 @@ def render_history_tab(state: dict[str, Any]) -> None:
 
     st.divider()
 
-    # フィルタ
-    col_f1, col_f2 = st.columns([2, 3])
-    with col_f1:
+    # クイックフィルタ
+    col_qf1, col_qf2 = st.columns([1, 4])
+    with col_qf1:
+        only_review = st.toggle(
+            "⚠ 要確認のみ",
+            value=False,
+            help="needs_review=True の仕訳だけ表示する",
+        )
+    with col_qf2:
         status_filter = st.multiselect(
             "状態フィルタ",
             options=["cash_pending", "card_matched", "settlement", "cash_confirmed"],
@@ -1398,10 +1330,12 @@ def render_history_tab(state: dict[str, Any]) -> None:
                 "settlement": "🏦 取り崩し",
                 "cash_confirmed": "💴 現金確定",
             }.get(s, s),
+            label_visibility="collapsed",
+            placeholder="状態で絞り込み(複数選択可)",
         )
-    with col_f2:
-        st.write("")  # spacing
 
+    if only_review:
+        filtered = [h for h in filtered if h.get("needs_review")]
     if status_filter:
         filtered = [h for h in filtered if h.get("match_status") in status_filter]
 
@@ -1524,6 +1458,13 @@ def _render_journal_row(h: dict[str, Any]) -> None:
 
             if h.get("needs_review"):
                 st.info("⚠ 要確認: " + " / ".join(h.get("review_reasons", [])))
+
+        # OCR raw 参照(エキスパンドで折りたたみ)
+        ocr_raw = h.get("ocr_raw")
+        if ocr_raw:
+            with st.expander("🔍 AI読取結果(参照)", expanded=False):
+                clean = {k: v for k, v in ocr_raw.items() if not k.startswith("_")}
+                st.json(clean)
 
 
 # ===================================
@@ -1685,7 +1626,6 @@ def main() -> None:
     tabs = st.tabs([
         "🏠 ダッシュボード",
         "📤 アップロード",
-        "📝 確認・編集",
         "💳 カード明細",
         "🔗 領収書突合",
         "🏦 銀行明細",
@@ -1698,18 +1638,16 @@ def main() -> None:
     with tabs[1]:
         render_upload_tab(state)
     with tabs[2]:
-        render_review_tab(state)
-    with tabs[3]:
         render_card_tab(state)
-    with tabs[4]:
+    with tabs[3]:
         render_match_tab(state)
-    with tabs[5]:
+    with tabs[4]:
         render_bank_tab(state)
-    with tabs[6]:
+    with tabs[5]:
         render_bank_match_tab(state)
-    with tabs[7]:
+    with tabs[6]:
         render_history_tab(state)
-    with tabs[8]:
+    with tabs[7]:
         render_trash_tab(state)
 
 
