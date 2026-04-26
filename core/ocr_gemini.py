@@ -1,5 +1,5 @@
 """
-Google Gemini API で領収書OCR
+Google Gemini API で領収書OCR(google-genai SDK)
 
 Anthropic Claude の代替として、Gemini Vision で画像から構造化データを抽出する。
 無料枠が大きい(月45,000枚相当)ので運用コストゼロで動かせる。
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -28,36 +27,48 @@ def extract_receipt_gemini(file_path: Path) -> dict[str, Any]:
         return _error("GEMINI_API_KEY が設定されていません")
 
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
     except ImportError:
-        return _error("google-generativeai パッケージがインストールされていません")
+        return _error("google-genai パッケージがインストールされていません")
 
     try:
         from PIL import Image
     except ImportError:
         return _error("Pillow がインストールされていません")
 
-    # API設定
-    genai.configure(api_key=api_key)
-
-    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    model = genai.GenerativeModel(model_name)
-
     # 画像読込(PDFの場合は1ページ目を画像化)
     image = _load_image(file_path)
-    if isinstance(image, dict):  # エラー
+    if isinstance(image, dict):  # エラー応答
         return image
+
+    model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    client = genai.Client(api_key=api_key)
 
     raw_text = ""
     try:
-        response = model.generate_content(
-            [EXTRACTION_PROMPT, image],
-            generation_config={
-                "temperature": 0,
-                "response_mime_type": "application/json",
-            },
+        # 画像を bytes に変換(PNG形式で送信)
+        from io import BytesIO
+        buf = BytesIO()
+        # RGBA等は変換
+        if image.mode not in ("RGB", "L"):
+            image = image.convert("RGB")
+        image.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                EXTRACTION_PROMPT,
+            ],
+            config=types.GenerateContentConfig(
+                temperature=0,
+                response_mime_type="application/json",
+            ),
         )
-        raw_text = response.text.strip() if response.text else ""
+
+        raw_text = (response.text or "").strip()
 
         # JSON抽出(念のためコードブロック対応)
         cleaned = raw_text
