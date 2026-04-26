@@ -1,8 +1,11 @@
 """
 データ永続化モジュール
 
-仕訳履歴・カード利用明細をJSONファイルに保存・読込する。
-SQLiteの代わりにシンプルなJSONベースで運用(MVP仕様)。
+バックエンドを自動切替で対応:
+- SUPABASE_URL / SUPABASE_KEY が設定されている → Supabase(本番・永続)
+- 設定がない → ローカルJSON(開発・フォールバック)
+
+UIや上位モジュールは本ファイルの公開関数だけを使えば良い設計。
 """
 
 from __future__ import annotations
@@ -13,7 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import storage_supabase as sb
 from .jst import now_iso
+
+
+def _use_supabase() -> bool:
+    """Supabaseバックエンドを使うか"""
+    return sb.is_configured()
 
 # ファイルパス
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -65,6 +74,8 @@ def load_history(include_deleted: bool = False) -> list[dict[str, Any]]:
     Args:
         include_deleted: True なら削除済も含める(ゴミ箱表示用)
     """
+    if _use_supabase():
+        return sb.list_journals(client_id=None, include_deleted=include_deleted)
     init_storage()
     history = _read_json(HISTORY_PATH, [])
     if include_deleted:
@@ -74,6 +85,8 @@ def load_history(include_deleted: bool = False) -> list[dict[str, Any]]:
 
 def load_deleted_history() -> list[dict[str, Any]]:
     """削除済の仕訳のみを読込(ゴミ箱用)"""
+    if _use_supabase():
+        return sb.list_deleted_journals(client_id=None)
     init_storage()
     history = _read_json(HISTORY_PATH, [])
     return [h for h in history if h.get("is_deleted")]
@@ -81,6 +94,8 @@ def load_deleted_history() -> list[dict[str, Any]]:
 
 def save_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """仕訳履歴に1件追加"""
+    if _use_supabase():
+        return sb.save_journal(entry)
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
@@ -95,6 +110,8 @@ def save_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 def update_entry(entry_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
     """既存仕訳を更新"""
+    if _use_supabase():
+        return sb.update_journal(entry_id, updates)
     history = load_history(include_deleted=True)
     for i, e in enumerate(history):
         if e.get("id") == entry_id:
@@ -106,6 +123,8 @@ def update_entry(entry_id: str, updates: dict[str, Any]) -> dict[str, Any] | Non
 
 def delete_entry(entry_id: str, reason: str = "") -> dict[str, Any] | None:
     """仕訳をソフト削除(復元可能)"""
+    if _use_supabase():
+        return sb.delete_journal_soft(entry_id, reason)
     return update_entry(entry_id, {
         "is_deleted": True,
         "deleted_at": now_iso(),
@@ -115,6 +134,8 @@ def delete_entry(entry_id: str, reason: str = "") -> dict[str, Any] | None:
 
 def restore_entry(entry_id: str) -> dict[str, Any] | None:
     """削除済仕訳を復元"""
+    if _use_supabase():
+        return sb.restore_journal(entry_id)
     return update_entry(entry_id, {
         "is_deleted": False,
         "deleted_at": None,
@@ -173,6 +194,8 @@ def update_journal_match(
 
 def load_card_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
     """カード明細を読込"""
+    if _use_supabase():
+        return sb.list_cards(client_id=None, include_deleted=include_deleted)
     init_storage()
     statements = _read_json(CARD_STATEMENTS_PATH, [])
     if include_deleted:
@@ -182,6 +205,8 @@ def load_card_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
 
 def load_deleted_card_statements() -> list[dict[str, Any]]:
     """削除済のカード明細のみ"""
+    if _use_supabase():
+        return sb.list_deleted_cards(client_id=None)
     init_storage()
     statements = _read_json(CARD_STATEMENTS_PATH, [])
     return [s for s in statements if s.get("is_deleted")]
@@ -189,6 +214,8 @@ def load_deleted_card_statements() -> list[dict[str, Any]]:
 
 def save_card_statement(statement: dict[str, Any]) -> dict[str, Any]:
     """カード明細1件を保存"""
+    if _use_supabase():
+        return sb.save_card({"match_status": "unmatched", **statement})
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
@@ -205,6 +232,9 @@ def save_card_statement(statement: dict[str, Any]) -> dict[str, Any]:
 
 def save_card_statements_bulk(statements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """カード明細を一括保存"""
+    if _use_supabase():
+        prepared = [{"match_status": "unmatched", **s} for s in statements]
+        return sb.save_cards_bulk(prepared)
     return [save_card_statement(s) for s in statements]
 
 
@@ -213,6 +243,8 @@ def update_card_statement(
     updates: dict[str, Any],
 ) -> dict[str, Any] | None:
     """カード明細を更新"""
+    if _use_supabase():
+        return sb.update_card(statement_id, updates)
     statements = load_card_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
@@ -224,6 +256,8 @@ def update_card_statement(
 
 def delete_card_statement(statement_id: str, reason: str = "") -> dict[str, Any] | None:
     """カード明細をソフト削除"""
+    if _use_supabase():
+        return sb.delete_card_soft(statement_id, reason)
     return update_card_statement(statement_id, {
         "is_deleted": True,
         "deleted_at": now_iso(),
@@ -233,6 +267,8 @@ def delete_card_statement(statement_id: str, reason: str = "") -> dict[str, Any]
 
 def restore_card_statement(statement_id: str) -> dict[str, Any] | None:
     """削除済カード明細を復元"""
+    if _use_supabase():
+        return sb.restore_card(statement_id)
     return update_card_statement(statement_id, {
         "is_deleted": False,
         "deleted_at": None,
@@ -261,6 +297,8 @@ def find_card_statements_by_client(client_id: str) -> list[dict[str, Any]]:
 
 def load_bank_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
     """銀行明細を読込"""
+    if _use_supabase():
+        return sb.list_banks(client_id=None, include_deleted=include_deleted)
     init_storage()
     statements = _read_json(BANK_STATEMENTS_PATH, [])
     if include_deleted:
@@ -270,6 +308,8 @@ def load_bank_statements(include_deleted: bool = False) -> list[dict[str, Any]]:
 
 def load_deleted_bank_statements() -> list[dict[str, Any]]:
     """削除済の銀行明細のみ"""
+    if _use_supabase():
+        return sb.list_deleted_banks(client_id=None)
     init_storage()
     statements = _read_json(BANK_STATEMENTS_PATH, [])
     return [s for s in statements if s.get("is_deleted")]
@@ -277,6 +317,8 @@ def load_deleted_bank_statements() -> list[dict[str, Any]]:
 
 def save_bank_statement(statement: dict[str, Any]) -> dict[str, Any]:
     """銀行明細1件を保存"""
+    if _use_supabase():
+        return sb.save_bank({"match_status": "unmatched", **statement})
     init_storage()
     enriched = {
         "id": str(uuid.uuid4()),
@@ -294,6 +336,9 @@ def save_bank_statement(statement: dict[str, Any]) -> dict[str, Any]:
 
 def save_bank_statements_bulk(statements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """銀行明細を一括保存"""
+    if _use_supabase():
+        prepared = [{"match_status": "unmatched", **s} for s in statements]
+        return sb.save_banks_bulk(prepared)
     return [save_bank_statement(s) for s in statements]
 
 
@@ -302,6 +347,8 @@ def update_bank_statement(
     updates: dict[str, Any],
 ) -> dict[str, Any] | None:
     """銀行明細を更新"""
+    if _use_supabase():
+        return sb.update_bank(statement_id, updates)
     statements = load_bank_statements(include_deleted=True)
     for i, s in enumerate(statements):
         if s.get("id") == statement_id:
@@ -313,6 +360,8 @@ def update_bank_statement(
 
 def delete_bank_statement(statement_id: str, reason: str = "") -> dict[str, Any] | None:
     """銀行明細をソフト削除"""
+    if _use_supabase():
+        return sb.delete_bank_soft(statement_id, reason)
     return update_bank_statement(statement_id, {
         "is_deleted": True,
         "deleted_at": now_iso(),
@@ -322,6 +371,8 @@ def delete_bank_statement(statement_id: str, reason: str = "") -> dict[str, Any]
 
 def restore_bank_statement(statement_id: str) -> dict[str, Any] | None:
     """削除済銀行明細を復元"""
+    if _use_supabase():
+        return sb.restore_bank(statement_id)
     return update_bank_statement(statement_id, {
         "is_deleted": False,
         "deleted_at": None,
@@ -384,34 +435,35 @@ def save_receipt_image(
     original_filename: str,
 ) -> str:
     """
-    領収書画像をローカルストレージに保存する。
+    領収書画像をストレージに保存する。
 
-    保存先: data/receipts/<client_id>/<file_hash>.<ext>
-    ファイル名はハッシュなので、同じファイルなら自動的に重複排除される。
+    Supabase 設定時: Supabase Storage の receipts バケットへ
+    未設定時: data/receipts/<client_id>/<file_hash>.<ext> へローカル保存
 
-    Args:
-        file_bytes: 画像のバイト列
-        client_id: クライアントID
-        file_hash: SHA-256ハッシュ(ファイル名に使う)
-        original_filename: 元のファイル名(拡張子取得用)
     Returns:
-        保存先の相対パス(data/receipts/<client>/<hash>.<ext>)
+        保存先パス(Supabase: bucket内パス / Local: data/receipts/...)
     """
-    # 拡張子を元ファイル名から取得
+    if _use_supabase():
+        return sb.upload_receipt(
+            file_bytes=file_bytes,
+            client_id=client_id,
+            file_hash=file_hash,
+            original_filename=original_filename,
+        )
+
+    # ローカルJSON フォールバック
     ext = Path(original_filename).suffix.lower()
     if not ext:
-        ext = ".bin"  # フォールバック
+        ext = ".bin"
 
     save_dir = RECEIPTS_DIR / client_id
     save_dir.mkdir(parents=True, exist_ok=True)
     save_path = save_dir / f"{file_hash}{ext}"
 
-    # 既存ファイルがあれば書き込みスキップ(ハッシュ一致 = 内容一致)
     if not save_path.exists():
         with open(save_path, "wb") as f:
             f.write(file_bytes)
 
-    # 相対パスで返す(JSON保存・移植性のため)
     return str(save_path.relative_to(DATA_DIR.parent)).replace("\\", "/")
 
 
@@ -419,6 +471,8 @@ def get_receipt_image_bytes(receipt_path: str) -> bytes | None:
     """保存済の領収書画像をバイト列で取得"""
     if not receipt_path:
         return None
+    if _use_supabase():
+        return sb.download_receipt(receipt_path)
     full_path = DATA_DIR.parent / receipt_path
     if not full_path.exists():
         return None
@@ -427,9 +481,14 @@ def get_receipt_image_bytes(receipt_path: str) -> bytes | None:
 
 
 def get_receipt_image_path(receipt_path: str) -> Path | None:
-    """保存済の領収書画像の絶対パスを返す"""
+    """
+    保存済の領収書画像の絶対パスを返す(ローカル時のみ).
+    Supabase時は None を返す → 呼び出し元は get_receipt_image_bytes() を使うこと.
+    """
     if not receipt_path:
         return None
+    if _use_supabase():
+        return None  # クラウド保存時はローカルパスは存在しない
     full_path = DATA_DIR.parent / receipt_path
     return full_path if full_path.exists() else None
 

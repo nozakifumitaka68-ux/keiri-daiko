@@ -72,6 +72,8 @@ def _hydrate_env_from_secrets() -> None:
                 "MF_CLIENT_ID",
                 "MF_CLIENT_SECRET",
                 "MF_REDIRECT_URI",
+                "SUPABASE_URL",
+                "SUPABASE_KEY",
             ):
                 value = st.secrets.get(key) if key in st.secrets else None
                 if value is not None and not os.getenv(key):
@@ -474,6 +476,25 @@ def render_sidebar() -> dict[str, Any]:
         <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
             <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💼 マネフォ</div>
             <div style="font-weight: 600; color: {GREEN};">実API連携</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ストレージモード(Supabase / ローカルJSON)
+    has_supabase = bool(os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_KEY"))
+    if has_supabase:
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💾 ストレージ</div>
+            <div style="font-weight: 600; color: {GREEN};">Supabase 永続化</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">DB+Storage(暗号化済)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {CORAL};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💾 ストレージ</div>
+            <div style="font-weight: 600; color: {CORAL};">ローカルJSON</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">⚠ 再デプロイで消失します</div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1524,23 +1545,25 @@ def _render_journal_row(h: dict[str, Any]) -> None:
             if h.get("needs_review"):
                 st.info("⚠ 要確認: " + " / ".join(h.get("review_reasons", [])))
 
-        # 領収書原本プレビュー
+        # 領収書原本プレビュー(Supabase / ローカル両対応)
         receipt_path = h.get("receipt_path")
         receipt_filename = h.get("receipt_filename") or "領収書"
         if receipt_path:
-            full_path = get_receipt_image_path(receipt_path)
-            if full_path and full_path.exists():
-                ext = full_path.suffix.lower()
+            data = get_receipt_image_bytes(receipt_path)
+            if data:
+                ext = Path(receipt_filename).suffix.lower() or Path(receipt_path).suffix.lower()
                 with st.expander(f"📎 領収書原本({receipt_filename})", expanded=False):
                     img_col, btn_col = st.columns([3, 1])
                     with img_col:
                         if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-                            st.image(str(full_path), use_container_width=True)
+                            from io import BytesIO
+                            st.image(BytesIO(data), use_container_width=True)
                         elif ext == ".pdf":
                             try:
-                                from pdf2image import convert_from_path
-                                images = convert_from_path(
-                                    str(full_path), first_page=1, last_page=1, dpi=150
+                                import tempfile as tf
+                                from pdf2image import convert_from_bytes
+                                images = convert_from_bytes(
+                                    data, first_page=1, last_page=1, dpi=150,
                                 )
                                 if images:
                                     st.image(images[0], use_container_width=True)
@@ -1550,8 +1573,6 @@ def _render_journal_row(h: dict[str, Any]) -> None:
                         else:
                             st.info(f"プレビュー非対応の形式: {ext}")
                     with btn_col:
-                        with open(full_path, "rb") as f:
-                            data = f.read()
                         st.download_button(
                             "📥 ダウンロード",
                             data=data,
@@ -1561,7 +1582,7 @@ def _render_journal_row(h: dict[str, Any]) -> None:
                         )
                         st.caption(f"📦 {len(data) / 1024:.1f} KB")
             else:
-                st.caption("📎 領収書ファイルが見つかりません(再起動等で消失した可能性)")
+                st.caption("📎 領収書ファイルが見つかりません(削除/未保存)")
 
         # OCR raw 参照(エキスパンドで折りたたみ)
         ocr_raw = h.get("ocr_raw")
