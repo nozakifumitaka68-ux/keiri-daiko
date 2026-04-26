@@ -41,6 +41,7 @@ EXTRACTION_PROMPT = """\
     {"description": "品目名", "amount": 金額}
   ],
   "payment_method": "cash" | "card" | "bank" | "unknown",
+  "people_count": 利用人数(数値。「○名様」「2名」「ご一行様N様」等の記載から抽出。不明・1名のみなら null),
   "confidence": 0.0〜1.0(読取確信度),
   "notes": "特記事項(手書き・かすれ・複数頁等があれば)"
 }
@@ -50,6 +51,9 @@ EXTRACTION_PROMPT = """\
 - 金額は数値型(カンマ・円記号なし)
 - 不明な項目は null
 - 税率は10%/8%のどちらかが明記されていない場合はnull
+- people_count は領収書に明記されている場合のみ抽出。
+  例: 「3名様」→3、「2名」→2、「ご一行様」→null、明記なし→null
+- 飲食・宿泊・娯楽サービスでない領収書(コンビニ・通販等)では people_count は null
 - JSONのみを返し、それ以外の説明文は含めないでください
 """
 
@@ -185,6 +189,7 @@ def _stub_response(path: Path) -> dict[str, Any]:
         "is_tax_included": True,
         "items": [{"description": "ダミー商品", "amount": amount}],
         "payment_method": "unknown",
+        "people_count": None,
         "confidence": 0.0,
         "notes": "スタブモード: 実際のOCRは実行されていません。.env でANTHROPIC_API_KEYを設定してください。",
         "_source_file": str(path),

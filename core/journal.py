@@ -64,6 +64,33 @@ DINING_KEYWORDS = [
 # 1人当たり10,000円超は接待交際費(令和6年4月以降の税制改正準拠)
 ENTERTAINMENT_AMOUNT_THRESHOLD = 10000
 
+# 宿泊系キーワード(摘要に含まれていたら旅費交通費に強制振り分け)
+ACCOMMODATION_DESCRIPTION_KEYWORDS = [
+    "宿泊", "宿泊費", "宿泊代", "ステイ", "STAY", "Stay",
+    "ROOM", "Room", "客室", "ルーム", "スイート", "ツイン", "シングル", "ダブル",
+    "1泊", "2泊", "3泊", "○泊", "泊数",
+]
+
+# ホテル・旅館系キーワード(支払先名)
+ACCOMMODATION_VENDOR_KEYWORDS = [
+    "ホテル", "HOTEL", "Hotel",
+    "旅館", "民宿", "ペンション", "ロッジ", "ヴィラ", "リゾート",
+    "ニューオータニ", "帝国ホテル", "リッツカールトン", "オークラ", "プリンス",
+    "ヒルトン", "Hilton", "シェラトン", "Sheraton", "マリオット", "Marriott",
+    "ハイアット", "Hyatt", "インターコンチネンタル",
+    "東横イン", "アパホテル", "APA", "ルートイン", "ドーミーイン",
+    "コンフォート", "ビジネスホテル", "カプセルホテル",
+]
+
+# 飲食示唆キーワード(ホテルでも、摘要にこれがあれば飲食扱い)
+DINING_DESCRIPTION_KEYWORDS = [
+    "飲食", "ディナー", "DINNER", "Dinner",
+    "ランチ", "LUNCH", "Lunch", "朝食", "BREAKFAST", "Breakfast",
+    "コース", "コース料理", "懐石", "弁当", "オードブル",
+    "食事", "料理", "サービス料",
+    "ドリンク", "ワイン", "シャンパン", "ビール",
+]
+
 # その他の科目別キーワード(飲食以外)
 ACCOUNT_KEYWORDS = {
     "旅費交通費": [
@@ -153,7 +180,15 @@ def generate_journal(ocr_result: dict[str, Any], client_id: str = "client_a") ->
     # 4. 確認必須フラグ
     needs_review = _needs_review(ocr_result, account)
 
-    # 5. 仕訳エントリを構築
+    # 5. 1人当たり金額(人数情報あれば計算)
+    amount = ocr_result.get("total_amount", 0) or 0
+    people_count = ocr_result.get("people_count")
+    if people_count and isinstance(people_count, (int, float)) and people_count > 0:
+        per_person_amount = int(amount / people_count)
+    else:
+        per_person_amount = None
+
+    # 6. 仕訳エントリを構築
     return {
         "client_id": client_id,
         "transaction_date": ocr_result.get("date") or datetime.now().strftime("%Y-%m-%d"),
@@ -161,12 +196,15 @@ def generate_journal(ocr_result: dict[str, Any], client_id: str = "client_a") ->
         "vendor_registration_number": ocr_result.get("vendor_registration_number"),
         "debit": debit_credit["debit"],
         "credit": debit_credit["credit"],
-        "amount": ocr_result.get("total_amount", 0),
+        "amount": amount,
         "tax_amount": ocr_result.get("tax_amount"),
         "tax_rate": tax_rate,
         "tax_category": tax_category,
         "description": _build_description(ocr_result),
         "payment_method_hint": payment_method,  # OCRが推定した参考値(仕訳には反映しない)
+        # 人数考慮の判定情報
+        "people_count": people_count,
+        "per_person_amount": per_person_amount,
         # 突合ステータス: cash_pending(初期) / card_matched(明細と紐付け済) / cash_confirmed(現金確定)
         "match_status": "cash_pending",
         "matched_card_statement_id": None,
@@ -196,42 +234,79 @@ def _estimate_account(
     entertainment_threshold: int = ENTERTAINMENT_AMOUNT_THRESHOLD,
 ) -> str:
     """
-    勘定科目をキーワード+金額ベースで推定する。
+    勘定科目をキーワード+金額(1人当たり考慮)ベースで推定する。
 
     判定優先順位:
-    1. 軽食系(弁当・カフェ・牛丼・コンビニ等) → 常に「会議費」
-    2. 会食系(居酒屋・レストラン・料亭等)
-       - しきい値以下 → 「会議費」
-       - しきい値超 → 「接待交際費」(令和6年税制改正準拠)
-    3. その他カテゴリ(交通費・通信費等) → キーワードマッチ
-    4. マッチなし → デフォルト(消耗品費)
+    1. 宿泊系(摘要に「宿泊」「ROOM」等) → 旅費交通費
+       (ホテル支払先 + 摘要に飲食キーワードがある場合は除外)
+    2. 軽食系(弁当・カフェ・牛丼・コンビニ等) → 常に会議費
+    3. 会食系(居酒屋・レストラン・料亭等) → 1人当たり金額で判定
+       - 1人当たりしきい値以下 → 会議費
+       - 1人当たりしきい値超 → 接待交際費(令和6年税制改正準拠)
+       ※ people_count あれば total_amount / people_count、なければ total_amount で判定
+    4. ホテル系支払先(摘要なし) → 旅費交通費(出張宿泊と推定)
+    5. その他カテゴリ(交通費・通信費等) → キーワードマッチ
+    6. マッチなし → デフォルト(消耗品費)
     """
-    text_blob = " ".join([
-        str(ocr_result.get("vendor") or ""),
-        " ".join(item.get("description", "") for item in ocr_result.get("items", [])),
-        str(ocr_result.get("notes") or ""),
-    ]).lower()
-    amount = ocr_result.get("total_amount") or 0
+    vendor = str(ocr_result.get("vendor") or "")
+    description_text = " ".join(
+        item.get("description", "") or "" for item in ocr_result.get("items", [])
+    )
+    notes_text = str(ocr_result.get("notes") or "")
 
-    # 1. 軽食系 → 常に会議費
+    text_blob = " ".join([vendor, description_text, notes_text]).lower()
+    description_lower = description_text.lower()
+    vendor_lower = vendor.lower()
+
+    amount = ocr_result.get("total_amount") or 0
+    people_count = ocr_result.get("people_count")
+
+    # 1人当たり金額(人数情報あれば計算、なければ総額をそのまま)
+    if people_count and isinstance(people_count, (int, float)) and people_count > 0:
+        per_person = amount / people_count
+    else:
+        per_person = amount
+
+    has_dining_in_description = any(
+        kw.lower() in description_lower for kw in DINING_DESCRIPTION_KEYWORDS
+    )
+    has_accommodation_in_description = any(
+        kw.lower() in description_lower for kw in ACCOMMODATION_DESCRIPTION_KEYWORDS
+    )
+    has_accommodation_in_vendor = any(
+        kw.lower() in vendor_lower for kw in ACCOMMODATION_VENDOR_KEYWORDS
+    )
+
+    # 1. 摘要に宿泊キーワード → 旅費交通費(ホテル+宿泊費 等)
+    if has_accommodation_in_description and not has_dining_in_description:
+        return "旅費交通費"
+
+    # 2. 軽食系 → 常に会議費
     for kw in LIGHT_FOOD_KEYWORDS:
         if kw.lower() in text_blob:
             return "会議費"
 
-    # 2. 会食系 → 金額で会議費 or 接待交際費
+    # 3. 会食系 → 1人当たり金額で判定
     for kw in DINING_KEYWORDS:
         if kw.lower() in text_blob:
-            if amount > entertainment_threshold:
+            # ホテル系で飲食キーワードが摘要にない場合は宿泊扱い
+            if has_accommodation_in_vendor and not has_dining_in_description:
+                return "旅費交通費"
+            if per_person > entertainment_threshold:
                 return "接待交際費"
             return "会議費"
 
-    # 3. その他カテゴリのキーワードマッチ
+    # 4. ホテル系支払先で摘要が空・不明 → 旅費交通費
+    if has_accommodation_in_vendor:
+        return "旅費交通費"
+
+    # 5. その他カテゴリのキーワードマッチ
     for account, keywords in ACCOUNT_KEYWORDS.items():
         for kw in keywords:
             if kw.lower() in text_blob:
                 return account
 
-    # 4. デフォルト
+    # 6. デフォルト
     return client_config.get("accounts", {}).get("default_expense", "消耗品費")
 
 
