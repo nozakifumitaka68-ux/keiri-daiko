@@ -1,0 +1,1280 @@
+"""
+経理代行システム - Streamlit UI
+
+ブラウザで「アップロード→確認・編集→突合→登録」を完結させる画面。
+起動: streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+import yaml
+from dotenv import load_dotenv
+
+from core.auth import render_logout_button, require_login
+from core.bank_statement import import_csv as import_bank_csv
+from core.card_statement import import_csv as import_card_csv
+from core.matcher import run_bank_matching, run_matching
+from core.mf_client import get_mf_client
+from core.pipeline import process_receipt
+from core.storage import (
+    find_bank_statements_by_client,
+    find_card_statements_by_client,
+    find_pending_receipts,
+    find_unmatched_bank_payments,
+    find_unsettled_card_statements,
+    load_bank_statements,
+    load_card_statements,
+    load_history,
+)
+
+load_dotenv()
+
+
+# ===================================
+# ページ設定
+# ===================================
+st.set_page_config(
+    page_title="経理代行システム",
+    page_icon="📒",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ===================================
+# カラーパレット(PPT資料と統一)
+# ===================================
+NAVY = "#1E2761"
+NAVY_DARK = "#141B47"
+ICE = "#E8EEF9"
+ICE_LIGHT = "#F5F7FB"
+AMBER = "#F59E0B"
+AMBER_DARK = "#B45309"
+CORAL = "#EF4444"
+GREEN = "#10B981"
+TEAL = "#14B8A6"
+GRAY = "#64748B"
+GRAY_LIGHT = "#94A3B8"
+
+
+# ===================================
+# カスタムCSS(Streamlit のデフォルトを上書き)
+# ===================================
+def inject_custom_css() -> None:
+    st.markdown(f"""
+    <style>
+    /* ベース */
+    .main .block-container {{
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+        max-width: 1400px;
+    }}
+
+    /* ヘッダー */
+    h1 {{
+        color: {NAVY};
+        font-weight: 700;
+        letter-spacing: -0.02em;
+    }}
+    h2 {{
+        color: {NAVY};
+        font-weight: 600;
+        margin-top: 1.5rem;
+    }}
+    h3 {{
+        color: {NAVY};
+        font-weight: 600;
+    }}
+
+    /* タブのデザイン */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 4px;
+        border-bottom: 2px solid {ICE};
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        padding: 0.6rem 1.2rem;
+        border-radius: 8px 8px 0 0;
+        font-weight: 500;
+        font-size: 0.95rem;
+        color: {GRAY};
+    }}
+    .stTabs [aria-selected="true"] {{
+        background-color: {NAVY} !important;
+        color: white !important;
+    }}
+
+    /* メトリックカード */
+    [data-testid="stMetric"] {{
+        background-color: white;
+        border: 1px solid {ICE};
+        padding: 1rem 1.2rem;
+        border-radius: 12px;
+        box-shadow: 0 1px 3px rgba(30, 39, 97, 0.05);
+    }}
+    [data-testid="stMetricLabel"] {{
+        color: {GRAY};
+        font-size: 0.85rem;
+        font-weight: 500;
+    }}
+    [data-testid="stMetricValue"] {{
+        color: {NAVY};
+        font-weight: 700;
+    }}
+
+    /* プライマリボタン(アンバー) */
+    .stButton > button[kind="primary"] {{
+        background-color: {AMBER};
+        color: white;
+        border: none;
+        font-weight: 600;
+        padding: 0.5rem 1.2rem;
+        border-radius: 8px;
+        box-shadow: 0 1px 3px rgba(245, 158, 11, 0.3);
+    }}
+    .stButton > button[kind="primary"]:hover {{
+        background-color: {AMBER_DARK};
+        box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);
+    }}
+
+    /* セカンダリボタン */
+    .stButton > button {{
+        border-radius: 8px;
+        font-weight: 500;
+    }}
+
+    /* サイドバー */
+    [data-testid="stSidebar"] {{
+        background-color: {NAVY};
+    }}
+    [data-testid="stSidebar"] * {{
+        color: white !important;
+    }}
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {{
+        color: {AMBER} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stMetric"] {{
+        background-color: {NAVY_DARK};
+        border: 1px solid {NAVY_DARK};
+    }}
+    [data-testid="stSidebar"] [data-testid="stMetricLabel"] {{
+        color: {ICE} !important;
+    }}
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] {{
+        color: {AMBER} !important;
+    }}
+    [data-testid="stSidebar"] .stSelectbox label,
+    [data-testid="stSidebar"] .stTextInput label {{
+        color: {ICE} !important;
+    }}
+
+    /* ステータスバッジ用クラス */
+    .badge {{
+        display: inline-block;
+        padding: 3px 10px;
+        border-radius: 12px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }}
+    .badge-cash {{
+        background-color: #FEF3C7;
+        color: {AMBER_DARK};
+    }}
+    .badge-card {{
+        background-color: #DCFCE7;
+        color: #166534;
+    }}
+    .badge-settlement {{
+        background-color: #DBEAFE;
+        color: #1E40AF;
+    }}
+    .badge-warning {{
+        background-color: #FEE2E2;
+        color: #991B1B;
+    }}
+
+    /* カード(汎用ラッパ) */
+    .info-card {{
+        background-color: white;
+        border: 1px solid {ICE};
+        border-radius: 12px;
+        padding: 1.2rem 1.5rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 1px 3px rgba(30, 39, 97, 0.05);
+    }}
+    .info-card-accent {{
+        border-left: 4px solid {AMBER};
+    }}
+
+    /* ハイライトボックス */
+    .highlight-box {{
+        background: linear-gradient(135deg, {NAVY} 0%, {NAVY_DARK} 100%);
+        color: white;
+        padding: 1.5rem 2rem;
+        border-radius: 16px;
+        margin: 1rem 0;
+    }}
+    .highlight-box h3 {{
+        color: {AMBER} !important;
+        margin-top: 0;
+    }}
+
+    /* 表(dataframe) */
+    [data-testid="stDataFrame"] {{
+        border: 1px solid {ICE};
+        border-radius: 8px;
+        overflow: hidden;
+    }}
+
+    /* expander */
+    [data-testid="stExpander"] {{
+        border: 1px solid {ICE};
+        border-radius: 12px;
+        background-color: white;
+    }}
+
+    /* file uploader */
+    [data-testid="stFileUploader"] section {{
+        background-color: white;
+        border: 2px dashed {ICE};
+        border-radius: 12px;
+        padding: 1.5rem;
+    }}
+    [data-testid="stFileUploader"] section:hover {{
+        border-color: {AMBER};
+        background-color: #FFFBF0;
+    }}
+
+    /* alert系の角丸を統一 */
+    .stAlert {{
+        border-radius: 12px;
+    }}
+
+    /* divider 弱める */
+    hr {{
+        border-color: {ICE} !important;
+        margin: 1.5rem 0 !important;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+# ===================================
+# 設定読込
+# ===================================
+@st.cache_data
+def load_config() -> dict[str, Any]:
+    config_path = Path(__file__).parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+config = load_config()
+
+
+# ===================================
+# ヘルパ
+# ===================================
+def status_badge(status: str | None, kind: str = "journal") -> str:
+    """ステータスをHTMLバッジに変換"""
+    if kind == "journal":
+        mapping = {
+            "cash_pending": ("💴 現金(突合待)", "badge-cash"),
+            "card_matched": ("💳 カード払", "badge-card"),
+            "cash_confirmed": ("💴 現金確定", "badge-cash"),
+            "settlement": ("🏦 取り崩し", "badge-settlement"),
+        }
+    elif kind == "card":
+        mapping = {
+            "unmatched": ("⏳ 未突合", "badge-warning"),
+            "matched": ("✅ 突合済", "badge-card"),
+        }
+    elif kind == "card_settlement":
+        mapping = {
+            "settled": ("🏦 引落済", "badge-settlement"),
+            None: ("⏳ 未決済", "badge-warning"),
+        }
+    elif kind == "bank":
+        mapping = {
+            "unmatched": ("⏳ 未突合", "badge-warning"),
+            "matched_card_payment": ("💳 カード引落", "badge-settlement"),
+            "matched_other": ("✅ 突合済", "badge-card"),
+        }
+    else:
+        mapping = {}
+
+    label, css = mapping.get(status, (status or "—", "badge"))
+    return f'<span class="badge {css}">{label}</span>'
+
+
+def metric_with_delta(
+    label: str,
+    value: str | int,
+    delta: str | None = None,
+    help_text: str | None = None,
+) -> None:
+    """カラム内で使うシンプルなメトリック"""
+    st.metric(label, value, delta=delta, help=help_text)
+
+
+# ===================================
+# サイドバー
+# ===================================
+def render_sidebar() -> dict[str, Any]:
+    st.sidebar.markdown(f"""
+    <div style="padding: 0.5rem 0 1rem 0; border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 1rem;">
+        <div style="font-size: 1.5rem; font-weight: 700; color: {AMBER};">📒 KEIRI-DAIKO</div>
+        <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">経理代行システム MVP</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # クライアント選択
+    clients = config.get("clients", {})
+    client_options = {cid: c.get("name", cid) for cid, c in clients.items()}
+    if not client_options:
+        client_options = {"client_a": "クライアントA"}
+
+    client_id = st.sidebar.selectbox(
+        "🏢 クライアント",
+        options=list(client_options.keys()),
+        format_func=lambda x: client_options[x],
+    )
+
+    # クライアント別のクイックステータス
+    history = load_history()
+    pending = find_pending_receipts(client_id)
+    cards = find_card_statements_by_client(client_id)
+    bank = find_bank_statements_by_client(client_id)
+    unsettled = find_unsettled_card_statements(client_id)
+    unmatched_bank = find_unmatched_bank_payments(client_id)
+
+    st.sidebar.markdown("##### 📊 現在の状況")
+    col_a, col_b = st.sidebar.columns(2)
+    with col_a:
+        st.metric("仕訳", len(history))
+        st.metric("カード明細", len(cards))
+    with col_b:
+        st.metric("未突合領収書", len(pending))
+        st.metric("未決済", len(unsettled))
+
+    st.sidebar.divider()
+
+    # モード表示
+    st.sidebar.markdown("##### ⚙ 動作モード")
+
+    ocr_stub = os.getenv("OCR_STUB_MODE", "0") == "1"
+    has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+    if ocr_stub or not has_api_key:
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {AMBER};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">🤖 OCR</div>
+            <div style="font-weight: 600; color: {AMBER};">スタブモード</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">ダミーデータを返す</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">🤖 OCR</div>
+            <div style="font-weight: 600; color: {GREEN};">Claude Vision</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">実APIで読取</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    mf_mode = os.getenv("MF_MODE", config.get("mf_mode", "mock"))
+    if mf_mode == "mock":
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {AMBER};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💼 マネフォ</div>
+            <div style="font-weight: 600; color: {AMBER};">モックモード</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">ローカルJSONに保存</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown(f"""
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💼 マネフォ</div>
+            <div style="font-weight: 600; color: {GREEN};">実API連携</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.sidebar.divider()
+    st.sidebar.markdown("##### 💡 ヒント")
+    st.sidebar.caption(
+        "1. 領収書をアップロード\n\n"
+        "2. カード明細CSVを取込\n\n"
+        "3. 領収書突合で未払金確定\n\n"
+        "4. 銀行明細CSVを取込\n\n"
+        "5. 引落突合で取り崩し仕訳生成"
+    )
+
+    return {
+        "client_id": client_id,
+        "client_name": client_options[client_id],
+        "mf_mode": mf_mode,
+        "ocr_stub": ocr_stub,
+        "stats": {
+            "history_count": len(history),
+            "pending_count": len(pending),
+            "cards_count": len(cards),
+            "bank_count": len(bank),
+            "unsettled_count": len(unsettled),
+            "unmatched_bank_count": len(unmatched_bank),
+        },
+    }
+
+
+# ===================================
+# タブ0: ダッシュボード
+# ===================================
+def render_dashboard(state: dict[str, Any]) -> None:
+    stats = state["stats"]
+
+    # ヒーローセクション
+    st.markdown(f"""
+    <div class="highlight-box">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+            <div>
+                <h3 style="color: {AMBER}; margin: 0;">📒 経理代行システム</h3>
+                <p style="margin: 0.5rem 0 0 0; opacity: 0.85; font-size: 1.05rem;">
+                    {state['client_name']} の処理状況
+                </p>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 0.85rem; opacity: 0.7;">{datetime.now().strftime('%Y年%m月%d日 %H:%M')}</div>
+                <div style="font-size: 0.75rem; opacity: 0.5;">最終更新</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # KPI カード
+    st.subheader("📊 ステータスサマリ")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_with_delta("📥 全仕訳", stats["history_count"], help_text="作成済の仕訳エントリ総数")
+    with c2:
+        metric_with_delta("⏳ 突合待ち領収書", stats["pending_count"], help_text="まだカード明細と紐付いていない領収書")
+    with c3:
+        metric_with_delta("💳 カード明細", stats["cards_count"], help_text="取込済のカード利用明細")
+    with c4:
+        metric_with_delta("🏦 銀行明細", stats["bank_count"], help_text="取込済の銀行入出金明細")
+
+    st.divider()
+
+    # 仕訳フローの可視化
+    st.subheader("🔄 仕訳生成フロー")
+    history = load_history()
+    client_history = [h for h in history if h.get("client_id") == state["client_id"]]
+    cash_pending = sum(1 for h in client_history if h.get("match_status") == "cash_pending")
+    card_matched = sum(1 for h in client_history if h.get("match_status") == "card_matched")
+    settlement = sum(1 for h in client_history if h.get("match_status") == "settlement")
+
+    flow_html = f"""
+    <div style="display: flex; gap: 0.5rem; align-items: stretch; flex-wrap: nowrap; overflow-x: auto;">
+      {_flow_card("Step 1", "領収書投入", "借方:勘定科目<br>貸方:現金", cash_pending, NAVY, "cash_pending")}
+      <div style="display: flex; align-items: center; padding: 0 0.3rem; color: {AMBER}; font-size: 1.5rem; font-weight: bold;">→</div>
+      {_flow_card("Step 2", "カード明細突合", "借方:勘定科目<br>貸方:未払金", card_matched, AMBER, "card_matched")}
+      <div style="display: flex; align-items: center; padding: 0 0.3rem; color: {AMBER}; font-size: 1.5rem; font-weight: bold;">→</div>
+      {_flow_card("Step 3", "銀行引落突合", "借方:未払金<br>貸方:普通預金", settlement, GREEN, "settlement")}
+    </div>
+    """
+    st.markdown(flow_html, unsafe_allow_html=True)
+
+    st.divider()
+
+    # 2カラム: 直近アクティビティ + 注意事項
+    col_l, col_r = st.columns([3, 2])
+
+    with col_l:
+        st.subheader("🕒 直近の活動")
+        recent = sorted(client_history, key=lambda h: h.get("created_at", ""), reverse=True)[:8]
+        if recent:
+            for h in recent:
+                _render_activity_item(h)
+        else:
+            st.info("まだ活動はありません。📤 アップロードタブから領収書を投入してください。")
+
+    with col_r:
+        st.subheader("⚠ 要対応")
+        # 確認必須 / 未決済 / 未突合銀行
+        needs_review = [h for h in client_history if h.get("needs_review")]
+        if needs_review:
+            st.warning(f"確認必須の仕訳: {len(needs_review)}件")
+        if stats["unsettled_count"] > 0:
+            st.info(f"未決済のカード明細: {stats['unsettled_count']}件 → 銀行明細で引落突合を")
+        if stats["unmatched_bank_count"] > 0:
+            st.info(f"未突合の銀行出金: {stats['unmatched_bank_count']}件")
+        if not needs_review and stats["unsettled_count"] == 0 and stats["unmatched_bank_count"] == 0:
+            st.success("✨ すべての処理が完了しています")
+
+        st.divider()
+        st.markdown("##### 📌 クイックアクション")
+        st.caption("各タブで以下が実行できます:")
+        st.markdown(
+            f"""
+            - **📤 アップロード** — 領収書投入
+            - **💳 カード明細** — CSV取込
+            - **🔗 領収書突合** — 未払金化
+            - **🏦 銀行明細** — CSV取込
+            - **💸 引落突合** — 取り崩し仕訳
+            """
+        )
+
+
+def _flow_card(step: str, title: str, journal: str, count: int, color: str, status_key: str) -> str:
+    return f"""
+    <div style="flex: 1; min-width: 200px; background: white; border: 2px solid {color}; border-radius: 14px; padding: 1.2rem; box-shadow: 0 2px 6px rgba(30, 39, 97, 0.06);">
+        <div style="font-size: 0.7rem; color: {color}; font-weight: 700; letter-spacing: 0.1em;">{step}</div>
+        <div style="font-size: 1.1rem; font-weight: 700; color: {NAVY}; margin: 0.3rem 0;">{title}</div>
+        <div style="background: {ICE_LIGHT}; padding: 0.5rem 0.7rem; border-radius: 6px; font-family: monospace; font-size: 0.78rem; color: {GRAY}; margin-bottom: 0.6rem;">
+            {journal}
+        </div>
+        <div style="display: flex; align-items: baseline; gap: 0.3rem;">
+            <div style="font-size: 1.8rem; font-weight: 700; color: {color};">{count}</div>
+            <div style="font-size: 0.75rem; color: {GRAY};">件</div>
+        </div>
+    </div>
+    """
+
+
+def _render_activity_item(h: dict[str, Any]) -> None:
+    created = (h.get("created_at") or "")[:19].replace("T", " ")
+    vendor = h.get("vendor") or "—"
+    amount = h.get("amount") or 0
+    debit = h.get("debit", "")
+    credit = h.get("credit", "")
+    badge = status_badge(h.get("match_status"), kind="journal")
+
+    st.markdown(f"""
+    <div style="background: white; border: 1px solid {ICE}; border-radius: 10px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem;">
+        <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;">
+                <strong style="color: {NAVY}; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis;">{vendor[:40]}</strong>
+                {badge}
+            </div>
+            <div style="font-size: 0.78rem; color: {GRAY}; margin-top: 0.2rem;">
+                {created}  •  借方:{debit}  /  貸方:{credit}
+            </div>
+        </div>
+        <div style="font-weight: 700; color: {NAVY}; font-size: 1.05rem; white-space: nowrap;">
+            ¥{amount:,}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ===================================
+# タブ1: アップロード
+# ===================================
+def render_upload_tab(state: dict[str, Any]) -> None:
+    st.subheader("📤 領収書アップロード")
+    st.caption("複数の領収書(画像/PDF)を一度にアップロードして、AI読取・仕訳生成を行います。")
+
+    uploaded_files = st.file_uploader(
+        "領収書ファイルをドラッグ&ドロップ または ファイル選択",
+        type=["jpg", "jpeg", "png", "pdf", "webp"],
+        accept_multiple_files=True,
+        key="upload_files",
+    )
+
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        process_btn = st.button(
+            "🚀 処理開始",
+            type="primary",
+            disabled=not uploaded_files,
+            use_container_width=True,
+        )
+    with col2:
+        auto_register = st.checkbox(
+            "🔄 処理後すぐ仕訳を保存(モックモードでもhistory.jsonに保存)",
+            value=True,
+        )
+
+    if process_btn and uploaded_files:
+        results = []
+        progress = st.progress(0.0, text="処理開始...")
+
+        for i, uf in enumerate(uploaded_files):
+            progress.progress(
+                (i + 1) / len(uploaded_files),
+                text=f"処理中 {i + 1}/{len(uploaded_files)}: {uf.name}",
+            )
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=Path(uf.name).suffix,
+            ) as tmp:
+                tmp.write(uf.read())
+                tmp_path = tmp.name
+
+            try:
+                result = process_receipt(
+                    tmp_path,
+                    client_id=state["client_id"],
+                    auto_register=auto_register,
+                    archive=False,
+                )
+                result["original_name"] = uf.name
+                results.append(result)
+            finally:
+                os.unlink(tmp_path)
+
+        progress.empty()
+        st.session_state["last_results"] = results
+        st.success(f"✅ {len(results)}件の処理が完了しました。「📝 確認・編集」タブで内容を確認してください。")
+
+    if "last_results" in st.session_state and st.session_state["last_results"]:
+        st.divider()
+        st.markdown("##### 直近の処理結果")
+        results = st.session_state["last_results"]
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            metric_with_delta("処理件数", len(results))
+        with c2:
+            ok = sum(1 for r in results if r.get("status") == "ok")
+            metric_with_delta("成功", ok)
+        with c3:
+            total = sum((r.get("journal", {}) or {}).get("amount") or 0 for r in results)
+            metric_with_delta("合計金額", f"¥{total:,}")
+
+        summary_df = _to_summary_df(results)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+
+# ===================================
+# タブ2: 確認・編集
+# ===================================
+def render_review_tab(state: dict[str, Any]) -> None:
+    st.subheader("📝 確認・編集")
+    st.caption("AI読取結果を確認し、必要なら修正してから仕訳を確定します。")
+
+    results = st.session_state.get("last_results", [])
+    if not results:
+        st.info("📤 アップロードタブから領収書を処理してください。")
+        return
+
+    for idx, result in enumerate(results):
+        ocr = result.get("ocr", {}) or {}
+        journal = result.get("journal", {}) or {}
+        original_name = result.get("original_name", f"file_{idx}")
+
+        title = (
+            f"📄 {original_name}  ·  "
+            f"{(journal.get('vendor') or '?')[:30]}  ·  "
+            f"¥{journal.get('amount') or 0:,}"
+        )
+
+        with st.expander(title, expanded=(idx == 0)):
+            if result.get("status") != "ok":
+                st.error(f"処理失敗: {result.get('status')}")
+                st.json(result)
+                continue
+
+            # ステータスバッジ
+            status = journal.get("match_status", "cash_pending")
+            st.markdown(status_badge(status), unsafe_allow_html=True)
+
+            if journal.get("needs_review"):
+                st.warning(
+                    "⚠ 確認必須: " + " / ".join(journal.get("review_reasons", []))
+                )
+
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                st.markdown("**📋 仕訳情報(編集可能)**")
+                edited = _render_journal_editor(journal, idx)
+                results[idx]["journal"] = {**journal, **edited}
+
+            with col2:
+                st.markdown("**🔍 AI読取結果(参照)**")
+                clean = {k: v for k, v in ocr.items() if not k.startswith("_")}
+                st.json(clean)
+
+            registration = result.get("registration")
+            if registration:
+                st.success(
+                    f"✅ 登録済: ID={registration.get('id')} / {registration.get('message', '')}"
+                )
+            else:
+                if st.button(
+                    f"💾 仕訳を保存(#{idx + 1})",
+                    key=f"register_{idx}",
+                    type="primary",
+                ):
+                    client = get_mf_client()
+                    reg_result = client.post_journal(results[idx]["journal"])
+                    results[idx]["registration"] = reg_result
+                    st.session_state["last_results"] = results
+                    st.rerun()
+
+
+def _render_journal_editor(journal: dict[str, Any], idx: int) -> dict[str, Any]:
+    """仕訳情報の編集UI"""
+    edited = {}
+    edited["transaction_date"] = st.text_input(
+        "日付", value=journal.get("transaction_date", ""), key=f"date_{idx}",
+    )
+    edited["vendor"] = st.text_input(
+        "支払先", value=journal.get("vendor", "") or "", key=f"vendor_{idx}",
+    )
+    edited["amount"] = st.number_input(
+        "金額(円)", value=int(journal.get("amount") or 0), step=1, key=f"amount_{idx}",
+    )
+    edited["debit"] = st.text_input(
+        "借方科目", value=journal.get("debit", ""), key=f"debit_{idx}",
+    )
+    edited["credit"] = st.text_input(
+        "貸方科目", value=journal.get("credit", ""), key=f"credit_{idx}",
+    )
+    tax_rate_options = [10, 8, 0]
+    current_tax = journal.get("tax_rate") or 10
+    edited["tax_rate"] = st.selectbox(
+        "税率(%)",
+        options=tax_rate_options,
+        index=tax_rate_options.index(current_tax) if current_tax in tax_rate_options else 0,
+        key=f"tax_{idx}",
+    )
+    edited["description"] = st.text_input(
+        "摘要", value=journal.get("description", "") or "", key=f"desc_{idx}",
+    )
+    return edited
+
+
+# ===================================
+# タブ3: カード明細
+# ===================================
+def render_card_tab(state: dict[str, Any]) -> None:
+    st.subheader("💳 カード利用明細")
+    st.caption(
+        "カード会社からダウンロードした明細CSVを取り込み、領収書との突合に使います。"
+    )
+
+    all_statements = find_card_statements_by_client(state["client_id"])
+    unmatched = [s for s in all_statements if s.get("match_status") == "unmatched"]
+    matched = [s for s in all_statements if s.get("match_status") == "matched"]
+
+    # KPI カード
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_with_delta("全明細", len(all_statements))
+    with c2:
+        metric_with_delta("⏳ 未突合", len(unmatched))
+    with c3:
+        metric_with_delta("✅ 突合済", len(matched))
+    with c4:
+        total = sum(s.get("amount") or 0 for s in all_statements)
+        metric_with_delta("合計金額", f"¥{total:,}")
+
+    st.divider()
+
+    col_l, col_r = st.columns([3, 2])
+    with col_l:
+        st.markdown("##### 📥 CSVアップロード")
+        uploaded_csv = st.file_uploader(
+            "カード明細CSV(三井住友・楽天・マネフォ書出し等)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="card_csv_uploader",
+        )
+    with col_r:
+        st.markdown("##### ⚙ 取込オプション")
+        card_name = st.text_input(
+            "カード名(任意)",
+            value="",
+            key="card_name_input",
+            placeholder="例: 三井住友VISA",
+            help="未入力ならCSV内の値か '未指定' になります",
+        )
+
+    if st.button(
+        "📥 CSVを取り込む",
+        type="primary",
+        disabled=not uploaded_csv,
+        use_container_width=False,
+    ):
+        csv_bytes = uploaded_csv.read()
+        saved = import_card_csv(
+            csv_bytes,
+            client_id=state["client_id"],
+            card_name=card_name or None,
+        )
+        st.success(f"✅ {len(saved)}件のカード明細を取り込みました。")
+        st.rerun()
+
+    st.divider()
+    st.markdown("##### 📋 取り込み済み明細")
+
+    if not all_statements:
+        st.info("まだ明細がありません。上のフォームからCSVをアップロードしてください。")
+        return
+
+    df = pd.DataFrame([
+        {
+            "ID": s.get("id", "")[:8],
+            "状態": "✅ 突合済" if s.get("match_status") == "matched" else "⏳ 未突合",
+            "決済": "🏦 引落済" if s.get("settlement_status") == "settled" else "—",
+            "利用日": s.get("usage_date"),
+            "計上日": s.get("posting_date"),
+            "支払先": s.get("vendor_raw"),
+            "金額": s.get("amount"),
+            "カード": s.get("card_name"),
+        }
+        for s in all_statements[::-1]
+    ])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ===================================
+# タブ4: 領収書突合
+# ===================================
+def render_match_tab(state: dict[str, Any]) -> None:
+    st.subheader("🔗 領収書 ↔ カード明細 突合")
+    st.caption(
+        "現金払いとして仮登録された仕訳を、取り込み済のカード明細と照合します。"
+        "マッチしたものは「貸方:現金 → 貸方:未払金」に書き換わります。"
+    )
+
+    pending_receipts = find_pending_receipts(state["client_id"])
+    all_statements = find_card_statements_by_client(state["client_id"])
+    unmatched_statements = [s for s in all_statements if s.get("match_status") == "unmatched"]
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_with_delta("⏳ 突合待ち仕訳", len(pending_receipts))
+    with c2:
+        metric_with_delta("⏳ 未突合カード明細", len(unmatched_statements))
+    with c3:
+        metric_with_delta("✅ 突合済明細", len(all_statements) - len(unmatched_statements))
+
+    st.divider()
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        if st.button(
+            "🔍 ドライラン(プレビュー)",
+            use_container_width=True,
+            help="DBは更新せず、マッチング結果だけ表示",
+        ):
+            result = run_matching(client_id=state["client_id"], dry_run=True)
+            st.session_state["match_preview"] = result
+    with col_r:
+        if st.button(
+            "✅ 突合実行(仕訳を更新)",
+            type="primary",
+            use_container_width=True,
+            disabled=not pending_receipts or not unmatched_statements,
+        ):
+            result = run_matching(client_id=state["client_id"], dry_run=False)
+            st.success(f"✅ {result['matched_count']}件の仕訳をカード払いに更新しました")
+            st.session_state["match_preview"] = result
+            st.rerun()
+
+    preview = st.session_state.get("match_preview")
+    if not preview:
+        if pending_receipts and unmatched_statements:
+            st.info("🔍 ドライラン または ✅ 突合実行 でマッチング結果が表示されます。")
+        elif not pending_receipts:
+            st.success("✨ すべての仕訳がカード明細と突合済 or 現金確定済です")
+        else:
+            st.warning("カード明細がまだ取り込まれていません。「💳 カード明細」タブから取り込んでください。")
+        return
+
+    st.divider()
+
+    if preview.get("dry_run"):
+        st.warning("⚠ ドライラン結果(まだ DB は更新されていません)")
+    else:
+        st.success(f"✅ 突合完了({preview['matched_count']}件マッチ)")
+
+    if preview["matched"]:
+        st.markdown(f"##### ✅ マッチした仕訳({len(preview['matched'])}件)")
+        df_m = pd.DataFrame([
+            {
+                "日付": m["journal_date"],
+                "領収書(支払先)": m["journal_vendor"],
+                "明細(支払先)": m["statement_vendor"],
+                "金額": m["journal_amount"],
+                "類似度": f"{m['vendor_similarity']:.0%}",
+            }
+            for m in preview["matched"]
+        ])
+        st.dataframe(df_m, use_container_width=True, hide_index=True)
+
+    col_um1, col_um2 = st.columns(2)
+    with col_um1:
+        st.markdown(f"##### ⏳ 未マッチの仕訳({len(preview['unmatched_receipts'])}件)")
+        if preview["unmatched_receipts"]:
+            df_ur = pd.DataFrame(preview["unmatched_receipts"])
+            st.dataframe(df_ur, use_container_width=True, hide_index=True)
+        else:
+            st.success("全件マッチ済")
+
+    with col_um2:
+        st.markdown(f"##### ⏳ 未マッチの明細({len(preview['unmatched_statements'])}件)")
+        if preview["unmatched_statements"]:
+            df_us = pd.DataFrame(preview["unmatched_statements"])
+            st.dataframe(df_us, use_container_width=True, hide_index=True)
+        else:
+            st.success("全件マッチ済")
+
+    with st.expander("⚙ 現在の突合しきい値"):
+        st.json(preview.get("config", {}))
+
+
+# ===================================
+# タブ5: 銀行明細
+# ===================================
+def render_bank_tab(state: dict[str, Any]) -> None:
+    st.subheader("🏦 銀行明細")
+    st.caption(
+        "普通預金の入出金CSVを取り込みます。カード会社への引落と未払金を突合し、"
+        "取り崩し仕訳(借方:未払金 / 貸方:普通預金)を自動生成します。"
+    )
+
+    all_bank = find_bank_statements_by_client(state["client_id"])
+    unmatched_payments = find_unmatched_bank_payments(state["client_id"])
+    matched_payments = [b for b in all_bank if b.get("match_status") != "unmatched"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_with_delta("全明細", len(all_bank))
+    with c2:
+        metric_with_delta("⏳ 未突合の出金", len(unmatched_payments))
+    with c3:
+        metric_with_delta("✅ 突合済", len(matched_payments))
+    with c4:
+        total_out = abs(sum(p.get("amount") or 0 for p in unmatched_payments))
+        metric_with_delta("未突合出金合計", f"¥{total_out:,}")
+
+    st.divider()
+
+    col_l, col_r = st.columns([3, 2])
+    with col_l:
+        st.markdown("##### 📥 CSVアップロード")
+        uploaded_csv = st.file_uploader(
+            "銀行明細CSV(三井住友銀行・みずほ・楽天等)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="bank_csv_uploader",
+        )
+    with col_r:
+        st.markdown("##### ⚙ 取込オプション")
+        account_name = st.text_input(
+            "口座名(任意)",
+            value="",
+            key="bank_account_input",
+            placeholder="例: 三井住友銀行 普通",
+        )
+
+    if st.button(
+        "📥 銀行CSVを取り込む",
+        type="primary",
+        disabled=not uploaded_csv,
+    ):
+        csv_bytes = uploaded_csv.read()
+        saved = import_bank_csv(
+            csv_bytes,
+            client_id=state["client_id"],
+            account_name=account_name or None,
+        )
+        st.success(f"✅ {len(saved)}件の銀行明細を取り込みました。")
+        st.rerun()
+
+    st.divider()
+    st.markdown("##### 📋 取り込み済み銀行明細")
+
+    if not all_bank:
+        st.info("まだ銀行明細がありません。上のフォームからCSVをアップロードしてください。")
+        return
+
+    df = pd.DataFrame([
+        {
+            "ID": b.get("id", "")[:8],
+            "状態": _bank_status_label(b.get("match_status")),
+            "取引日": b.get("transaction_date"),
+            "摘要": b.get("description"),
+            "金額": b.get("amount"),
+            "残高": b.get("balance"),
+            "口座": b.get("account_name"),
+        }
+        for b in all_bank[::-1]
+    ])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def _bank_status_label(status: str | None) -> str:
+    return {
+        "unmatched": "⏳ 未突合",
+        "matched_card_payment": "💳 カード引落突合済",
+        "matched_other": "✅ その他突合済",
+    }.get(status or "", status or "")
+
+
+# ===================================
+# タブ6: 引落突合
+# ===================================
+def render_bank_match_tab(state: dict[str, Any]) -> None:
+    st.subheader("💸 銀行引落 ↔ 未払金 突合")
+    st.caption(
+        "銀行口座からのカード会社引落と、未決済のカード明細群を照合し、"
+        "未払金の取り崩し仕訳を自動生成します。"
+    )
+
+    bank_payments = find_unmatched_bank_payments(state["client_id"])
+    unsettled = find_unsettled_card_statements(state["client_id"])
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        metric_with_delta("⏳ 未突合出金(銀行)", len(bank_payments))
+    with c2:
+        metric_with_delta("⏳ 未決済カード明細", len(unsettled))
+    with c3:
+        metric_with_delta(
+            "未決済合計",
+            f"¥{sum(s.get('amount') or 0 for s in unsettled):,}",
+        )
+
+    st.divider()
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        if st.button(
+            "🔍 ドライラン(プレビュー)",
+            use_container_width=True,
+            key="bank_match_dry",
+        ):
+            result = run_bank_matching(client_id=state["client_id"], dry_run=True)
+            st.session_state["bank_match_preview"] = result
+    with col_r:
+        if st.button(
+            "✅ 引落突合実行(取り崩し仕訳生成)",
+            type="primary",
+            use_container_width=True,
+            disabled=not bank_payments or not unsettled,
+            key="bank_match_run",
+        ):
+            result = run_bank_matching(client_id=state["client_id"], dry_run=False)
+            st.success(f"✅ {result['matched_count']}件の引落を取り崩し仕訳に変換しました")
+            st.session_state["bank_match_preview"] = result
+            st.rerun()
+
+    preview = st.session_state.get("bank_match_preview")
+    if not preview:
+        if bank_payments and unsettled:
+            st.info("🔍 ドライラン または ✅ 引落突合実行 で結果が表示されます。")
+        elif not bank_payments:
+            st.success("✨ 銀行明細でカード引落として処理すべきものがありません")
+        else:
+            st.warning("未決済のカード明細がありません。先に「🔗 領収書突合」を実行してください。")
+        return
+
+    st.divider()
+
+    if preview.get("dry_run"):
+        st.warning("⚠ ドライラン結果(まだ DB は更新されていません)")
+    else:
+        st.success(f"✅ 引落突合完了({preview['matched_count']}件マッチ)")
+
+    if preview["matched"]:
+        st.markdown(f"##### ✅ マッチした引落({len(preview['matched'])}件)")
+        df_m = pd.DataFrame([
+            {
+                "引落日": m["bank_date"],
+                "銀行摘要": m["bank_description"],
+                "識別カード会社": m["card_company"] or "(摘要から特定できず)",
+                "対象カード名": m["card_name"],
+                "対象明細件数": m["card_statement_count"],
+                "合計金額": m["total_amount"],
+            }
+            for m in preview["matched"]
+        ])
+        st.dataframe(df_m, use_container_width=True, hide_index=True)
+
+    col_um1, col_um2 = st.columns(2)
+    with col_um1:
+        st.markdown(f"##### ⏳ 未マッチの出金({len(preview['unmatched_bank_payments'])}件)")
+        if preview["unmatched_bank_payments"]:
+            df_u = pd.DataFrame(preview["unmatched_bank_payments"])
+            st.dataframe(df_u, use_container_width=True, hide_index=True)
+        else:
+            st.success("全件マッチ済")
+
+    with col_um2:
+        st.markdown("##### カード別 未決済サマリ")
+        cards_summary = preview.get("cards_summary_by_name", {})
+        if cards_summary:
+            df_c = pd.DataFrame([
+                {
+                    "カード名": k,
+                    "件数": v["count"],
+                    "合計": v["total"],
+                    "決済済": "✅" if v["settled"] else "⏳",
+                }
+                for k, v in cards_summary.items()
+            ])
+            st.dataframe(df_c, use_container_width=True, hide_index=True)
+        else:
+            st.info("未決済カード明細がありません")
+
+    with st.expander("⚙ 現在の引落突合設定"):
+        st.json(preview.get("config", {}))
+
+
+# ===================================
+# タブ7: 仕訳台帳
+# ===================================
+def render_history_tab(state: dict[str, Any]) -> None:
+    st.subheader("📚 仕訳台帳")
+    st.caption("全仕訳エントリの一覧。状態(現金/カード払/取り崩し)別にフィルタもできます。")
+
+    history = load_history()
+    filtered = [e for e in history if e.get("client_id") == state["client_id"]]
+
+    # KPI
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        metric_with_delta("全履歴件数", len(history))
+    with c2:
+        metric_with_delta("このクライアント", len(filtered))
+    with c3:
+        total = sum(h.get("amount") or 0 for h in filtered)
+        metric_with_delta("合計金額", f"¥{total:,}")
+    with c4:
+        review = sum(1 for h in filtered if h.get("needs_review"))
+        metric_with_delta("⚠ 要確認", review)
+
+    if not filtered:
+        st.info("このクライアントの履歴はまだありません。")
+        return
+
+    st.divider()
+
+    # フィルタ
+    col_f1, col_f2 = st.columns([2, 3])
+    with col_f1:
+        status_filter = st.multiselect(
+            "状態フィルタ",
+            options=["cash_pending", "card_matched", "settlement", "cash_confirmed"],
+            default=[],
+            format_func=lambda s: {
+                "cash_pending": "💴 現金(突合待)",
+                "card_matched": "💳 カード払",
+                "settlement": "🏦 取り崩し",
+                "cash_confirmed": "💴 現金確定",
+            }.get(s, s),
+        )
+    with col_f2:
+        st.write("")  # spacing
+
+    if status_filter:
+        filtered = [h for h in filtered if h.get("match_status") in status_filter]
+
+    def _status_label(status: str | None) -> str:
+        return {
+            "cash_pending": "💴 現金",
+            "card_matched": "💳 カード払",
+            "cash_confirmed": "💴 現金確定",
+            "settlement": "🏦 取り崩し",
+        }.get(status or "", status or "")
+
+    df = pd.DataFrame([
+        {
+            "ID": h.get("id", "")[:8],
+            "登録日": (h.get("created_at") or "")[:19].replace("T", " "),
+            "取引日": h.get("transaction_date"),
+            "支払先": h.get("vendor"),
+            "借方": h.get("debit"),
+            "貸方": h.get("credit"),
+            "金額": h.get("amount"),
+            "税率": f"{h.get('tax_rate') or '—'}%" if h.get("tax_rate") else "—",
+            "支払区分": _status_label(h.get("match_status")),
+            "要確認": "⚠" if h.get("needs_review") else "✓",
+        }
+        for h in filtered[::-1]
+    ])
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with st.expander("🔍 履歴の生データを見る(JSON)"):
+        st.json(filtered[::-1])
+
+
+# ===================================
+# ヘルパ
+# ===================================
+def _to_summary_df(results: list[dict[str, Any]]) -> pd.DataFrame:
+    rows = []
+    for r in results:
+        j = r.get("journal", {}) or {}
+        reg = r.get("registration") or {}
+        rows.append({
+            "ファイル": r.get("original_name", ""),
+            "ステータス": r.get("status"),
+            "支払先": j.get("vendor"),
+            "借方": j.get("debit"),
+            "貸方": j.get("credit"),
+            "金額": j.get("amount"),
+            "要確認": "⚠" if j.get("needs_review") else "✓",
+            "登録": reg.get("status", "未登録"),
+        })
+    return pd.DataFrame(rows)
+
+
+# ===================================
+# メイン
+# ===================================
+def main() -> None:
+    inject_custom_css()
+
+    # 認証ガード(パスワード未通過なら以降を表示しない)
+    if not require_login():
+        return
+
+    state = render_sidebar()
+    render_logout_button()
+
+    tabs = st.tabs([
+        "🏠 ダッシュボード",
+        "📤 アップロード",
+        "📝 確認・編集",
+        "💳 カード明細",
+        "🔗 領収書突合",
+        "🏦 銀行明細",
+        "💸 引落突合",
+        "📚 仕訳台帳",
+    ])
+    with tabs[0]:
+        render_dashboard(state)
+    with tabs[1]:
+        render_upload_tab(state)
+    with tabs[2]:
+        render_review_tab(state)
+    with tabs[3]:
+        render_card_tab(state)
+    with tabs[4]:
+        render_match_tab(state)
+    with tabs[5]:
+        render_bank_tab(state)
+    with tabs[6]:
+        render_bank_match_tab(state)
+    with tabs[7]:
+        render_history_tab(state)
+
+
+if __name__ == "__main__":
+    main()

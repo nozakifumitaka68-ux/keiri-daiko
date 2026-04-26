@@ -1,0 +1,16 @@
+# 経理代行システム Streamlit テーマ
+# カラーパレット: Midnight Executive + Amber Accent (PPT資料と統一)
+
+[theme]
+primaryColor = "#F59E0B"            # アンバー(アクセント・ボタン)
+backgroundColor = "#FAFBFC"         # ほぼ白(本体背景)
+secondaryBackgroundColor = "#FFFFFF" # 白(カード・サイドバー)
+textColor = "#1E293B"               # チャコール(本文)
+font = "sans serif"
+
+[server]
+headless = true
+port = 8501
+
+[browser]
+gatherUsageStats = false

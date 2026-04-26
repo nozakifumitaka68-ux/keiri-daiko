@@ -1,0 +1,74 @@
+# ===================================
+# 経理代行システム 設定ファイル
+# ===================================
+
+# マネーフォワード API モード切替
+# - mock: ローカルJSONに保存(API無くても動く)
+# - real: 実際にマネフォAPIを呼ぶ
+mf_mode: mock
+
+# クライアント設定(初期は1社、後で追加)
+clients:
+  client_a:
+    name: "クライアントA"
+    inbox_dir: "data/inbox/client_a"
+    # 勘定科目マッピング(クライアント別)
+    accounts:
+      default_expense: "消耗品費"
+      taxi: "旅費交通費"
+      meal: "接待交際費"
+      office_supplies: "事務用品費"
+      utility: "水道光熱費"
+      software: "通信費"
+
+# 仕訳生成ルール
+journal_rules:
+  # 10万円以上は固定資産候補としてマーク
+  high_value_threshold: 100000
+  # デフォルト税区分
+  default_tax_rate: 10
+  # 支払方法判定
+  payment_methods:
+    - cash       # 現金
+    - card       # クレジットカード
+    - bank       # 銀行振込
+    - personal   # 個人立替
+
+# Claude API 設定
+claude:
+  model: "claude-sonnet-4-5-20250929"
+  max_tokens: 2048
+
+# 領収書↔カード明細の突合ルール
+# 現状はシンプル設定。将来的に段階マッチングに拡張可能
+matching:
+  # 日付の許容範囲(日)。0=同日のみ、1以上で前後N日まで許容
+  date_tolerance_days: 0
+  # 金額の許容誤差(円)。0=完全一致、1以上で±N円まで許容
+  amount_tolerance_yen: 0
+  # 支払先の文字列類似度しきい値(0.0-1.0)
+  vendor_similarity_threshold: 0.7
+  # 1領収書に対して候補が複数ある時の最低スコア差(誤マッチ防止)
+  min_score_gap: 0.1
+
+# 銀行明細(カード引落)↔ カード明細群の突合ルール
+# 月次で複数のカード利用が銀行口座からまとめて引落される前提
+bank_matching:
+  # 引落金額とカード明細合計の許容誤差(円)
+  amount_tolerance_yen: 0
+  # 銀行摘要からカード会社を判定するキーワード(設定で増やせる)
+  card_company_keywords:
+    - "三井住友カード"
+    - "SMBC"
+    - "VISA"
+    - "JCB"
+    - "MASTER"
+    - "AMEX"
+    - "アメリカン"
+    - "楽天カード"
+    - "RAKUTEN"
+    - "イオンカード"
+    - "AEON"
+    - "セゾン"
+    - "オリコ"
+    - "ダイナース"
