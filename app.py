@@ -40,6 +40,36 @@ load_dotenv()
 
 
 # ===================================
+# Streamlit Cloud Secrets を環境変数に注入
+# ===================================
+# Cloudでは .env 不在のため、st.secrets から os.environ にコピーして
+# core モジュールが os.getenv() で読めるようにする
+def _hydrate_env_from_secrets() -> None:
+    try:
+        if hasattr(st, "secrets"):
+            for key in (
+                "APP_PASSWORD",
+                "OCR_ENGINE",
+                "OCR_STUB_MODE",
+                "GEMINI_API_KEY",
+                "GEMINI_MODEL",
+                "ANTHROPIC_API_KEY",
+                "MF_MODE",
+                "MF_CLIENT_ID",
+                "MF_CLIENT_SECRET",
+                "MF_REDIRECT_URI",
+            ):
+                value = st.secrets.get(key) if key in st.secrets else None
+                if value is not None and not os.getenv(key):
+                    os.environ[key] = str(value)
+    except (FileNotFoundError, KeyError, AttributeError):
+        pass
+
+
+_hydrate_env_from_secrets()
+
+
+# ===================================
 # ページ設定
 # ===================================
 st.set_page_config(
@@ -288,6 +318,20 @@ config = load_config()
 # ===================================
 # ヘルパ
 # ===================================
+def _detect_ocr_engine() -> str:
+    """現在のOCRエンジンを判定(サイドバー表示用)"""
+    explicit = (os.getenv("OCR_ENGINE") or "").lower().strip()
+    if explicit in ("stub", "gemini", "claude"):
+        return explicit
+    if os.getenv("OCR_STUB_MODE") == "1":
+        return "stub"
+    if os.getenv("GEMINI_API_KEY"):
+        return "gemini"
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "claude"
+    return "stub"
+
+
 def status_badge(status: str | None, kind: str = "journal") -> str:
     """ステータスをHTMLバッジに変換"""
     if kind == "journal":
@@ -375,24 +419,22 @@ def render_sidebar() -> dict[str, Any]:
     # モード表示
     st.sidebar.markdown("##### ⚙ 動作モード")
 
-    ocr_stub = os.getenv("OCR_STUB_MODE", "0") == "1"
-    has_api_key = bool(os.getenv("ANTHROPIC_API_KEY"))
-    if ocr_stub or not has_api_key:
-        st.sidebar.markdown(f"""
-        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {AMBER};">
-            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">🤖 OCR</div>
-            <div style="font-weight: 600; color: {AMBER};">スタブモード</div>
-            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">ダミーデータを返す</div>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.sidebar.markdown(f"""
-        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
-            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">🤖 OCR</div>
-            <div style="font-weight: 600; color: {GREEN};">Claude Vision</div>
-            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">実APIで読取</div>
-        </div>
-        """, unsafe_allow_html=True)
+    # OCRエンジンを動的に判定(core/ocr.py の _select_engine と同じロジック)
+    ocr_engine = _detect_ocr_engine()
+    ocr_meta = {
+        "gemini": ("Gemini Vision", "実APIで読取(無料枠)", GREEN),
+        "claude": ("Claude Vision", "実APIで読取", GREEN),
+        "stub": ("スタブモード", "ダミーデータを返す", AMBER),
+    }
+    label, desc, color = ocr_meta.get(ocr_engine, ("Unknown", "不明", AMBER))
+    st.sidebar.markdown(f"""
+    <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {color};">
+        <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">🤖 OCR</div>
+        <div style="font-weight: 600; color: {color};">{label}</div>
+        <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">{desc}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    ocr_stub = ocr_engine == "stub"
 
     mf_mode = os.getenv("MF_MODE", config.get("mf_mode", "mock"))
     if mf_mode == "mock":

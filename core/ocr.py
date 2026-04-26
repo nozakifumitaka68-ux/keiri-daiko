@@ -66,6 +66,12 @@ def extract_receipt(file_path: str | Path) -> dict[str, Any]:
     """
     領収書ファイルから構造化データを抽出する。
 
+    OCRエンジンは環境変数 OCR_ENGINE で選択可能:
+      - "stub": ダミー応答(APIキー不要・開発初期用)
+      - "gemini": Google Gemini API(無料枠が大きい・推奨)
+      - "claude": Anthropic Claude Vision(高精度・有料)
+      - "auto"(デフォルト): GEMINI_API_KEY > ANTHROPIC_API_KEY > stub の優先順で自動選択
+
     Args:
         file_path: 領収書の画像 or PDFのパス
 
@@ -77,11 +83,42 @@ def extract_receipt(file_path: str | Path) -> dict[str, Any]:
     if not path.exists():
         return _error_response(f"ファイルが見つかりません: {path}")
 
-    # スタブモード判定: APIキーが無い or OCR_STUB_MODE=1
-    if _is_stub_mode():
+    engine = _select_engine()
+
+    if engine == "stub":
         return _stub_response(path)
 
-    # 拡張子から画像/PDFを判定
+    if engine == "gemini":
+        from .ocr_gemini import extract_receipt_gemini
+        return extract_receipt_gemini(path)
+
+    if engine == "claude":
+        return _extract_with_claude(path)
+
+    return _error_response(f"不明なOCRエンジン: {engine}")
+
+
+def _select_engine() -> str:
+    """OCRエンジンを選択する"""
+    # 明示指定があればそれを使う
+    explicit = (os.getenv("OCR_ENGINE") or "").lower().strip()
+    if explicit in ("stub", "gemini", "claude"):
+        return explicit
+
+    # 後方互換: OCR_STUB_MODE=1 は強制スタブ
+    if os.getenv("OCR_STUB_MODE") == "1":
+        return "stub"
+
+    # 自動選択(無料枠の大きい Gemini を優先)
+    if os.getenv("GEMINI_API_KEY"):
+        return "gemini"
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return "claude"
+    return "stub"
+
+
+def _extract_with_claude(path: Path) -> dict[str, Any]:
+    """Claude Vision でOCRする(既存ロジック)"""
     ext = path.suffix.lower()
     if ext in SUPPORTED_IMAGE_EXTENSIONS:
         return _extract_from_image(path)
@@ -96,12 +133,8 @@ def extract_receipt(file_path: str | Path) -> dict[str, Any]:
 # ===================================
 
 def _is_stub_mode() -> bool:
-    """スタブモードかどうか判定"""
-    if os.getenv("OCR_STUB_MODE") == "1":
-        return True
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        return True
-    return False
+    """スタブモードかどうか判定(後方互換用、新コードは _select_engine() を使う)"""
+    return _select_engine() == "stub"
 
 
 def _stub_response(path: Path) -> dict[str, Any]:
