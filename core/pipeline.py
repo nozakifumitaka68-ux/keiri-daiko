@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .duplicate import calculate_file_hash_from_path, find_duplicate_receipts
 from .journal import generate_journal
 from .mf_client import get_mf_client
 from .ocr import extract_receipt
@@ -26,6 +27,8 @@ def process_receipt(
     client_id: str = "client_a",
     auto_register: bool = False,
     archive: bool = False,
+    skip_duplicates: bool = True,
+    force_register: bool = False,
 ) -> dict[str, Any]:
     """
     領収書1枚を処理する。
@@ -33,14 +36,24 @@ def process_receipt(
     Args:
         file_path: 領収書ファイル
         client_id: クライアントID
-        auto_register: True なら確認なしでマネフォ登録(needs_review=Trueでもスキップ無し)
-                       False なら下書きのみ作成し、登録は呼び出し元(UI)に委ねる
+        auto_register: True なら確認なしでマネフォ登録
         archive: True なら処理後に data/processed/ へ移動
+        skip_duplicates: True なら既存の重複(ハッシュ一致or取引データ一致)を検出してスキップ
+        force_register: True なら重複検出されても強制登録
 
     Returns:
-        {"ocr": ..., "journal": ..., "registration": ...} の結合結果
+        {
+          "status": "ok" | "ocr_failed" | "journal_failed" | "duplicate_skipped",
+          "ocr": ...,
+          "journal": ...,
+          "registration": ...,
+          "duplicate_info": {...},  # 重複検出時のみ
+        }
     """
     path = Path(file_path)
+
+    # 0. ファイルハッシュ計算
+    file_hash = calculate_file_hash_from_path(path) if path.exists() else None
 
     # 1. OCR
     logger.info(f"[OCR] {path}")
@@ -52,6 +65,7 @@ def process_receipt(
             "ocr": ocr_result,
             "journal": None,
             "registration": None,
+            "file_hash": file_hash,
         }
 
     # 2. 仕訳生成
@@ -64,16 +78,40 @@ def process_receipt(
             "ocr": ocr_result,
             "journal": journal,
             "registration": None,
+            "file_hash": file_hash,
         }
 
-    # 3. 登録(オプション)
+    # 3. 重複検出
+    duplicate_info = find_duplicate_receipts(
+        client_id=client_id,
+        file_hash=file_hash,
+        transaction_date=journal.get("transaction_date"),
+        amount=journal.get("amount"),
+        vendor=journal.get("vendor"),
+    )
+
+    if duplicate_info["has_duplicate"] and skip_duplicates and not force_register:
+        logger.warning(f"[Duplicate detected] {path} - skipping registration")
+        return {
+            "status": "duplicate_skipped",
+            "ocr": ocr_result,
+            "journal": journal,
+            "registration": None,
+            "duplicate_info": duplicate_info,
+            "file_hash": file_hash,
+        }
+
+    # 仕訳に file_hash を埋め込んで保存できるようにする
+    journal["file_hash"] = file_hash
+
+    # 4. 登録(オプション)
     registration = None
     if auto_register:
         logger.info(f"[MF Register] {path}")
         client = get_mf_client()
         registration = client.post_journal(journal)
 
-    # 4. アーカイブ(オプション)
+    # 5. アーカイブ(オプション)
     if archive and path.exists():
         archive_dir = Path(__file__).parent.parent / "data" / "processed" / client_id
         archive_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +125,8 @@ def process_receipt(
         "ocr": ocr_result,
         "journal": journal,
         "registration": registration,
+        "duplicate_info": duplicate_info if duplicate_info["has_duplicate"] else None,
+        "file_hash": file_hash,
     }
 
 

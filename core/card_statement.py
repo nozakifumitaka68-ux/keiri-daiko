@@ -59,7 +59,8 @@ def import_csv(
     csv_content: str | bytes,
     client_id: str = "client_a",
     card_name: str | None = None,
-) -> list[dict[str, Any]]:
+    skip_duplicates: bool = True,
+) -> dict[str, Any]:
     """
     CSV内容からカード明細を取り込み、保存する。
 
@@ -67,15 +68,23 @@ def import_csv(
         csv_content: CSVのテキスト内容(または bytes)
         client_id: クライアントID
         card_name: カード名(指定がない場合はCSVの列から取得 or "未指定")
+        skip_duplicates: True なら既存と重複する行はスキップ
     Returns:
-        保存された明細リスト
+        {
+          "saved": 保存された明細リスト,
+          "skipped": 重複でスキップされた明細リスト,
+          "saved_count": int,
+          "skipped_count": int,
+        }
     """
+    from .duplicate import filter_new_card_statements
+
     if isinstance(csv_content, bytes):
         csv_content = _decode_csv_bytes(csv_content)
 
     rows = _parse_csv(csv_content)
     if not rows:
-        return []
+        return {"saved": [], "skipped": [], "saved_count": 0, "skipped_count": 0}
 
     statements = []
     for row in rows:
@@ -83,18 +92,36 @@ def import_csv(
         if statement:
             statements.append(statement)
 
-    return save_card_statements_bulk(statements)
+    if skip_duplicates:
+        new_stmts, dup_stmts = filter_new_card_statements(client_id, statements)
+    else:
+        new_stmts, dup_stmts = statements, []
+
+    saved = save_card_statements_bulk(new_stmts) if new_stmts else []
+
+    return {
+        "saved": saved,
+        "skipped": dup_stmts,
+        "saved_count": len(saved),
+        "skipped_count": len(dup_stmts),
+    }
 
 
 def import_csv_file(
     file_path: str | Path,
     client_id: str = "client_a",
     card_name: str | None = None,
-) -> list[dict[str, Any]]:
+    skip_duplicates: bool = True,
+) -> dict[str, Any]:
     """ファイルパスから取り込み"""
     path = Path(file_path)
     with open(path, "rb") as f:
-        return import_csv(f.read(), client_id=client_id, card_name=card_name)
+        return import_csv(
+            f.read(),
+            client_id=client_id,
+            card_name=card_name,
+            skip_duplicates=skip_duplicates,
+        )
 
 
 # ===================================
@@ -222,6 +249,6 @@ if __name__ == "__main__":
 
     target = sys.argv[1]
     client = sys.argv[2] if len(sys.argv) > 2 else "client_a"
-    saved = import_csv_file(target, client_id=client)
-    print(f"取り込み完了: {len(saved)}件")
-    print(json.dumps(saved[:3], ensure_ascii=False, indent=2))
+    result = import_csv_file(target, client_id=client)
+    print(f"取り込み完了: 新規 {result['saved_count']}件 / 重複スキップ {result['skipped_count']}件")
+    print(json.dumps(result["saved"][:3], ensure_ascii=False, indent=2))

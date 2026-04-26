@@ -658,12 +658,20 @@ def render_upload_tab(state: dict[str, Any]) -> None:
         key="upload_files",
     )
 
-    process_btn = st.button(
-        "🚀 処理開始",
-        type="primary",
-        disabled=not uploaded_files,
-        use_container_width=False,
-    )
+    col_btn, col_opt = st.columns([1, 3])
+    with col_btn:
+        process_btn = st.button(
+            "🚀 処理開始",
+            type="primary",
+            disabled=not uploaded_files,
+            use_container_width=True,
+        )
+    with col_opt:
+        force_register = st.checkbox(
+            "🔄 重複検出されても強制登録(通常はOFF推奨)",
+            value=False,
+            help="同じ領収書を意図的にもう一度登録したい時だけ ON にする",
+        )
 
     if process_btn and uploaded_files:
         results = []
@@ -689,6 +697,8 @@ def render_upload_tab(state: dict[str, Any]) -> None:
                     client_id=state["client_id"],
                     auto_register=True,
                     archive=False,
+                    skip_duplicates=True,
+                    force_register=force_register,
                 )
                 result["original_name"] = uf.name
                 results.append(result)
@@ -699,19 +709,52 @@ def render_upload_tab(state: dict[str, Any]) -> None:
         st.session_state["last_results"] = results
 
         ok_count = sum(1 for r in results if r.get("status") == "ok")
+        dup_count = sum(1 for r in results if r.get("status") == "duplicate_skipped")
         review_count = sum(
             1 for r in results
-            if (r.get("journal") or {}).get("needs_review")
+            if r.get("status") == "ok" and (r.get("journal") or {}).get("needs_review")
         )
 
-        st.success(
-            f"✅ {len(results)}件の処理が完了しました。"
-            f"仕訳台帳に保存済みです。"
-        )
+        msg_parts = []
+        if ok_count > 0:
+            msg_parts.append(f"✅ {ok_count}件 新規登録")
+        if dup_count > 0:
+            msg_parts.append(f"⏭ {dup_count}件 重複スキップ")
+
+        if msg_parts:
+            st.success(" / ".join(msg_parts) + "(仕訳台帳に保存済み)")
+
+        if dup_count > 0:
+            with st.expander(f"⏭ 重複スキップされた領収書({dup_count}件)", expanded=True):
+                for r in results:
+                    if r.get("status") != "duplicate_skipped":
+                        continue
+                    name = r.get("original_name", "—")
+                    j = r.get("journal", {}) or {}
+                    info = r.get("duplicate_info", {}) or {}
+                    st.markdown(f"**📄 {name}**  ¥{j.get('amount') or 0:,}  ·  {j.get('vendor', '—')}")
+                    if info.get("exact_hash_match"):
+                        st.caption(
+                            "🔁 ファイル内容が完全一致(SHA-256ハッシュ): "
+                            + ", ".join(
+                                f"{m['id_short']}({m['vendor']} ¥{m['amount']:,})"
+                                for m in info["exact_hash_match"]
+                            )
+                        )
+                    if info.get("data_match"):
+                        st.caption(
+                            "📋 取引データが類似一致(日付・金額・支払先): "
+                            + ", ".join(
+                                f"{m['id_short']}({m['vendor']} ¥{m['amount']:,})"
+                                for m in info["data_match"]
+                            )
+                        )
+                st.info("💡 もし意図的に重複登録したい場合は、上の「強制登録」をONにしてもう一度処理してください")
+
         if review_count > 0:
             st.warning(
                 f"⚠ {review_count}件は確認が必要です。"
-                f"「📚 仕訳台帳」タブで「要確認のみ」フィルタを使うと素早くチェックできます。"
+                f"「📚 仕訳台帳」タブで「⚠ 要確認のみ」フィルタを使うと素早くチェックできます。"
             )
 
     # 直近の処理結果(セッション中のみ)
@@ -799,12 +842,21 @@ def render_card_tab(state: dict[str, Any]) -> None:
         use_container_width=False,
     ):
         csv_bytes = uploaded_csv.read()
-        saved = import_card_csv(
+        result = import_card_csv(
             csv_bytes,
             client_id=state["client_id"],
             card_name=card_name or None,
+            skip_duplicates=True,
         )
-        st.success(f"✅ {len(saved)}件のカード明細を取り込みました。")
+        msg_parts = []
+        if result["saved_count"] > 0:
+            msg_parts.append(f"✅ {result['saved_count']}件 新規取込")
+        if result["skipped_count"] > 0:
+            msg_parts.append(f"⏭ {result['skipped_count']}件 重複スキップ")
+        if msg_parts:
+            st.success(" / ".join(msg_parts))
+        else:
+            st.warning("取り込めるデータがありませんでした")
         st.rerun()
 
     st.divider()
@@ -1055,12 +1107,21 @@ def render_bank_tab(state: dict[str, Any]) -> None:
         disabled=not uploaded_csv,
     ):
         csv_bytes = uploaded_csv.read()
-        saved = import_bank_csv(
+        result = import_bank_csv(
             csv_bytes,
             client_id=state["client_id"],
             account_name=account_name or None,
+            skip_duplicates=True,
         )
-        st.success(f"✅ {len(saved)}件の銀行明細を取り込みました。")
+        msg_parts = []
+        if result["saved_count"] > 0:
+            msg_parts.append(f"✅ {result['saved_count']}件 新規取込")
+        if result["skipped_count"] > 0:
+            msg_parts.append(f"⏭ {result['skipped_count']}件 重複スキップ")
+        if msg_parts:
+            st.success(" / ".join(msg_parts))
+        else:
+            st.warning("取り込めるデータがありませんでした")
         st.rerun()
 
     st.divider()
@@ -1593,13 +1654,21 @@ def _render_trash_row_bank(b: dict[str, Any]) -> None:
 # ヘルパ
 # ===================================
 def _to_summary_df(results: list[dict[str, Any]]) -> pd.DataFrame:
+    status_map = {
+        "ok": "✅ 新規登録",
+        "duplicate_skipped": "⏭ 重複スキップ",
+        "ocr_failed": "❌ OCR失敗",
+        "journal_failed": "❌ 仕訳生成失敗",
+        "exception": "❌ 例外",
+    }
     rows = []
     for r in results:
         j = r.get("journal", {}) or {}
         reg = r.get("registration") or {}
+        status_label = status_map.get(r.get("status"), r.get("status"))
         rows.append({
             "ファイル": r.get("original_name", ""),
-            "ステータス": r.get("status"),
+            "ステータス": status_label,
             "支払先": j.get("vendor"),
             "借方": j.get("debit"),
             "貸方": j.get("credit"),
