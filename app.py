@@ -25,7 +25,7 @@ from core.card_statement import import_csv as import_card_csv
 from core.jst import to_jst_display
 from core.matcher import run_bank_matching, run_matching
 from core.mf_client import get_mf_client
-from core.pipeline import process_receipt
+from core.pipeline import process_receipt, retry_ocr
 from core.storage import (
     delete_bank_statement,
     delete_card_statement,
@@ -342,6 +342,7 @@ def _status_label(status: str | None) -> str:
         "card_matched": "💳 カード払",
         "cash_confirmed": "💴 現金確定",
         "settlement": "🏦 取り崩し",
+        "ocr_failed": "❌ OCR失敗",
     }.get(status or "", status or "")
 
 
@@ -367,6 +368,7 @@ def status_badge(status: str | None, kind: str = "journal") -> str:
             "card_matched": ("💳 カード払", "badge-card"),
             "cash_confirmed": ("💴 現金確定", "badge-cash"),
             "settlement": ("🏦 取り崩し", "badge-settlement"),
+            "ocr_failed": ("❌ OCR失敗", "badge-warning"),
         }
     elif kind == "card":
         mapping = {
@@ -1399,7 +1401,7 @@ def render_history_tab(state: dict[str, Any]) -> None:
     st.divider()
 
     # クイックフィルタ
-    col_qf1, col_qf2 = st.columns([1, 4])
+    col_qf1, col_qf2, col_qf3 = st.columns([1, 1, 3])
     with col_qf1:
         only_review = st.toggle(
             "⚠ 要確認のみ",
@@ -1407,15 +1409,22 @@ def render_history_tab(state: dict[str, Any]) -> None:
             help="needs_review=True の仕訳だけ表示する",
         )
     with col_qf2:
+        only_failed = st.toggle(
+            "❌ OCR失敗のみ",
+            value=False,
+            help="再OCR or 手動入力が必要な失敗エントリだけ表示",
+        )
+    with col_qf3:
         status_filter = st.multiselect(
             "状態フィルタ",
-            options=["cash_pending", "card_matched", "settlement", "cash_confirmed"],
+            options=["cash_pending", "card_matched", "settlement", "cash_confirmed", "ocr_failed"],
             default=[],
             format_func=lambda s: {
                 "cash_pending": "💴 現金(突合待)",
                 "card_matched": "💳 カード払",
                 "settlement": "🏦 取り崩し",
                 "cash_confirmed": "💴 現金確定",
+                "ocr_failed": "❌ OCR失敗",
             }.get(s, s),
             label_visibility="collapsed",
             placeholder="状態で絞り込み(複数選択可)",
@@ -1423,6 +1432,8 @@ def render_history_tab(state: dict[str, Any]) -> None:
 
     if only_review:
         filtered = [h for h in filtered if h.get("needs_review")]
+    if only_failed:
+        filtered = [h for h in filtered if h.get("match_status") == "ocr_failed"]
     if status_filter:
         filtered = [h for h in filtered if h.get("match_status") in status_filter]
 
@@ -1470,11 +1481,44 @@ def _render_journal_row(h: dict[str, Any]) -> None:
     vendor = h.get("vendor") or "—"
     amount = h.get("amount") or 0
     badge = status_badge(h.get("match_status"), kind="journal")
+    is_failed = h.get("match_status") == "ocr_failed"
 
-    title = f"📄 {vendor[:30]}  ¥{amount:,}  ·  {h.get('transaction_date')}  ·  {short_id}"
+    # 失敗時はタイトルにアイコン付け
+    icon = "❌" if is_failed else "📄"
+    title = f"{icon} {vendor[:30]}  ¥{amount:,}  ·  {h.get('transaction_date') or '日付不明'}  ·  {short_id}"
 
-    with st.expander(title, expanded=False):
+    with st.expander(title, expanded=is_failed):  # 失敗エントリは展開状態で表示
         st.markdown(badge, unsafe_allow_html=True)
+
+        # OCR失敗時の専用UI: 再OCRボタン + エラー表示
+        if is_failed:
+            st.error("⚠ OCR読取に失敗しています。「🔄 OCR再実行」または下のフォームで「✏ 手動入力」してください")
+            ocr_raw = h.get("ocr_raw") or {}
+            err = ocr_raw.get("_error") or "(詳細不明)"
+            st.caption(f"📝 エラー詳細: {err}")
+            if ocr_raw.get("_retried_at"):
+                st.caption(f"🔄 最終リトライ: {ocr_raw.get('_retried_at')}")
+
+            # 再OCRボタン
+            retry_col1, retry_col2 = st.columns([1, 3])
+            with retry_col1:
+                if st.button(
+                    "🔄 OCR再実行",
+                    key=f"retry_ocr_{entry_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    with st.spinner("Gemini で再OCR実行中..."):
+                        result = retry_ocr(entry_id, client_id=h.get("client_id", "client_a"))
+                    if result["status"] == "ok":
+                        st.success("✅ OCR成功!仕訳を更新しました")
+                        st.rerun()
+                    elif result["status"] == "still_failed":
+                        st.error(f"❌ まだ失敗: {result.get('error')}")
+                    else:
+                        st.error(f"❌ {result.get('error', '不明なエラー')}")
+            with retry_col2:
+                st.caption("👈 押すと保存済画像で再度OCRを試みます。それでもダメなら下で手動入力してください。")
 
         col_l, col_r = st.columns([3, 2])
         with col_l:

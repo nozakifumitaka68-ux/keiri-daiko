@@ -396,6 +396,59 @@ def _empty_journal(ocr_result: dict[str, Any], error: str) -> dict[str, Any]:
 
 
 # ===================================
+# OCR失敗プレースホルダー仕訳
+# ===================================
+
+def create_failed_placeholder(
+    client_id: str,
+    file_hash: str | None,
+    receipt_path: str | None,
+    receipt_filename: str,
+    error_message: str,
+) -> dict[str, Any]:
+    """
+    OCR失敗時のプレースホルダー仕訳を生成する。
+
+    画像は保存されるが、仕訳の中身は空(または不明)。
+    後から「再OCR実行」または「手動入力」で完成させる。
+
+    match_status: "ocr_failed"(失敗状態)
+    """
+    return {
+        "client_id": client_id,
+        "transaction_date": None,  # 不明
+        "vendor": f"[OCR失敗] {receipt_filename}",
+        "vendor_registration_number": None,
+        "debit": None,
+        "credit": None,
+        "amount": 0,
+        "tax_amount": None,
+        "tax_rate": None,
+        "tax_category": None,
+        "description": "OCR読取失敗(再実行 or 手動入力で完成させてください)",
+        "payment_method_hint": "unknown",
+        "people_count": None,
+        "per_person_amount": None,
+        "match_status": "ocr_failed",
+        "matched_card_statement_id": None,
+        "needs_review": True,
+        "review_reasons": [
+            "OCR読取に失敗しました",
+            f"エラー: {error_message}",
+        ],
+        "confidence": 0.0,
+        "source_file": None,
+        "file_hash": file_hash,
+        "receipt_path": receipt_path,
+        "receipt_filename": receipt_filename,
+        "ocr_raw": {
+            "_failed": True,
+            "_error": error_message,
+        },
+    }
+
+
+# ===================================
 # 取り崩し仕訳(銀行引落でカード払い決済)
 # ===================================
 
