@@ -22,7 +22,12 @@ from dotenv import load_dotenv
 from core.auth import render_logout_button, require_login
 from core.bank_statement import import_csv as import_bank_csv
 from core.card_statement import import_csv as import_card_csv
-from core.jst import to_jst_display
+from core.exporter import (
+    filter_for_export,
+    journals_to_mf_csv,
+    journals_to_simple_csv,
+)
+from core.jst import to_jst_display, now_yyyymmdd
 from core.matcher import run_bank_matching, run_matching
 from core.mf_client import get_mf_client
 from core.pipeline import process_receipt, retry_ocr
@@ -468,10 +473,10 @@ def render_sidebar() -> dict[str, Any]:
     mf_mode = os.getenv("MF_MODE", config.get("mf_mode", "mock"))
     if mf_mode == "mock":
         st.sidebar.markdown(f"""
-        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {AMBER};">
-            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💼 マネフォ</div>
-            <div style="font-weight: 600; color: {AMBER};">モックモード</div>
-            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">ローカルJSONに保存</div>
+        <div style="background-color: {NAVY_DARK}; padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 0.4rem; border-left: 3px solid {GREEN};">
+            <div style="font-size: 0.75rem; color: {ICE}; opacity: 0.7;">💼 マネフォ連携</div>
+            <div style="font-weight: 600; color: {GREEN};">CSVエクスポート運用</div>
+            <div style="font-size: 0.7rem; color: {ICE}; opacity: 0.6;">仕訳台帳からCSV出力可</div>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1399,6 +1404,136 @@ def render_history_tab(state: dict[str, Any]) -> None:
         return
 
     st.divider()
+
+    # ===================================
+    # 📤 マネフォ取込CSV エクスポート
+    # ===================================
+    with st.expander("📤 仕訳CSVエクスポート(マネフォ取込用)", expanded=False):
+        st.caption(
+            "確定申告/会計の **仕訳CSVインポート** で取り込めるフォーマットで出力します。"
+            "API連携不要で月次運用が可能。"
+        )
+
+        ex_col1, ex_col2, ex_col3 = st.columns(3)
+        with ex_col1:
+            ex_date_from = st.text_input(
+                "取引日 From(YYYY-MM-DD)",
+                value="",
+                placeholder="例: 2025-01-01",
+                key="ex_date_from",
+            )
+        with ex_col2:
+            ex_date_to = st.text_input(
+                "取引日 To(YYYY-MM-DD)",
+                value="",
+                placeholder="例: 2025-12-31",
+                key="ex_date_to",
+            )
+        with ex_col3:
+            ex_format = st.selectbox(
+                "出力形式",
+                options=["mf", "simple"],
+                format_func=lambda x: {
+                    "mf": "📊 マネフォ仕訳取込形式",
+                    "simple": "📋 汎用CSV(社内確認用)",
+                }[x],
+                key="ex_format",
+            )
+
+        ex_status_options = st.multiselect(
+            "含める状態",
+            options=["cash_pending", "card_matched", "settlement", "cash_confirmed"],
+            default=["cash_pending", "card_matched", "settlement", "cash_confirmed"],
+            format_func=_status_label,
+            key="ex_statuses",
+        )
+
+        # 対象件数表示
+        ex_filtered = filter_for_export(
+            filtered,
+            date_from=ex_date_from or None,
+            date_to=ex_date_to or None,
+            statuses=ex_status_options or None,
+            exclude_failed=True,
+        )
+
+        ex_btn_col1, ex_btn_col2 = st.columns([1, 3])
+        with ex_btn_col1:
+            ex_count = len(ex_filtered)
+            ex_total = sum(j.get("amount") or 0 for j in ex_filtered)
+            st.metric("出力対象", f"{ex_count}件", help=f"合計 ¥{ex_total:,}")
+        with ex_btn_col2:
+            if ex_count > 0:
+                if ex_format == "mf":
+                    csv_content = journals_to_mf_csv(ex_filtered)
+                    fname = f"keiri-daiko_mf_{now_yyyymmdd()}.csv"
+                else:
+                    csv_content = journals_to_simple_csv(ex_filtered)
+                    fname = f"keiri-daiko_simple_{now_yyyymmdd()}.csv"
+                st.download_button(
+                    "📥 CSV ダウンロード",
+                    data=csv_content.encode("utf-8-sig"),  # BOM付きでExcel互換
+                    file_name=fname,
+                    mime="text/csv",
+                    type="primary",
+                    use_container_width=True,
+                )
+            else:
+                st.info("出力対象が0件です。フィルタ条件を見直してください。")
+
+        st.caption(
+            "💡 マネフォクラウド会計/確定申告で **「仕訳帳」 → 「インポート」 → 「ファイルから」** "
+            "を選択してアップロードすれば取り込めます。"
+        )
+
+    # ===================================
+    # 🔄 一括再OCR(失敗エントリの一斉リトライ)
+    # ===================================
+    failed_entries = [h for h in filtered if h.get("match_status") == "ocr_failed"]
+    if failed_entries:
+        with st.expander(f"🔄 一括再OCR({len(failed_entries)}件 失敗中)", expanded=False):
+            st.caption(
+                "Gemini無料枠が回復したら、失敗エントリを一気に再OCR実行できます。"
+                "1分15リクエスト・1日1500件の制限内で順次処理。"
+            )
+
+            col_b1, col_b2 = st.columns([1, 3])
+            with col_b1:
+                if st.button(
+                    f"🔄 全{len(failed_entries)}件を再OCR",
+                    type="primary",
+                    use_container_width=True,
+                    key="bulk_retry_ocr",
+                ):
+                    progress = st.progress(0.0, text="一括再OCR開始...")
+                    success_count = 0
+                    still_failed = 0
+                    for i, fe in enumerate(failed_entries):
+                        progress.progress(
+                            (i + 1) / len(failed_entries),
+                            text=f"処理中 {i + 1}/{len(failed_entries)}: {fe.get('receipt_filename', '')[:40]}",
+                        )
+                        result = retry_ocr(fe["id"], client_id=fe.get("client_id", "client_a"))
+                        if result["status"] == "ok":
+                            success_count += 1
+                        else:
+                            still_failed += 1
+
+                    progress.empty()
+                    st.success(
+                        f"完了: ✅ {success_count}件成功 / ❌ {still_failed}件まだ失敗"
+                    )
+                    if still_failed > 0:
+                        st.info(
+                            "失敗が残っている場合は、Gemini無料枠を使い切った可能性があります。"
+                            "明日再実行するか、個別に編集モードで「🔄 OCR再実行」してください。"
+                        )
+                    st.rerun()
+            with col_b2:
+                st.caption(
+                    f"⚠ 大量(50件以上)を一気に処理すると、"
+                    f"無料枠制限に引っかかりやすいです。少しずつ実行することを推奨。"
+                )
 
     # クイックフィルタ
     col_qf1, col_qf2, col_qf3 = st.columns([1, 1, 3])
