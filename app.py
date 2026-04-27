@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from core.auth import render_logout_button, require_login
 from core.bank_statement import import_csv as import_bank_csv
 from core.card_statement import import_csv as import_card_csv
+from core.jst import to_jst_display
 from core.matcher import run_bank_matching, run_matching
 from core.mf_client import get_mf_client
 from core.pipeline import process_receipt
@@ -639,7 +640,7 @@ def _flow_card(step: str, title: str, journal: str, count: int, color: str, stat
 
 
 def _render_activity_item(h: dict[str, Any]) -> None:
-    created = (h.get("created_at") or "")[:19].replace("T", " ")
+    created = to_jst_display(h.get("created_at"))
     vendor = h.get("vendor") or "—"
     amount = h.get("amount") or 0
     debit = h.get("debit", "")
@@ -1437,7 +1438,7 @@ def render_history_tab(state: dict[str, Any]) -> None:
         df = pd.DataFrame([
             {
                 "ID": h.get("id", "")[:8],
-                "登録日": (h.get("created_at") or "")[:19].replace("T", " "),
+                "登録日": to_jst_display(h.get("created_at")),
                 "取引日": h.get("transaction_date"),
                 "支払先": h.get("vendor"),
                 "借方": h.get("debit"),
@@ -1652,7 +1653,7 @@ def render_trash_tab(state: dict[str, Any]) -> None:
 
 def _render_trash_row_journal(h: dict[str, Any]) -> None:
     eid = h.get("id", "")
-    deleted_at = (h.get("deleted_at") or "")[:19].replace("T", " ")
+    deleted_at = to_jst_display(h.get("deleted_at"))
     title = (
         f"📄 {h.get('vendor', '—')[:30]}  ¥{h.get('amount') or 0:,}  ·  "
         f"削除: {deleted_at}"
@@ -1674,7 +1675,7 @@ def _render_trash_row_journal(h: dict[str, Any]) -> None:
 
 def _render_trash_row_card(s: dict[str, Any]) -> None:
     sid = s.get("id", "")
-    deleted_at = (s.get("deleted_at") or "")[:19].replace("T", " ")
+    deleted_at = to_jst_display(s.get("deleted_at"))
     title = (
         f"💳 {s.get('vendor_raw', '—')[:30]}  ¥{s.get('amount') or 0:,}  ·  "
         f"削除: {deleted_at}"
@@ -1695,7 +1696,7 @@ def _render_trash_row_card(s: dict[str, Any]) -> None:
 
 def _render_trash_row_bank(b: dict[str, Any]) -> None:
     bid = b.get("id", "")
-    deleted_at = (b.get("deleted_at") or "")[:19].replace("T", " ")
+    deleted_at = to_jst_display(b.get("deleted_at"))
     title = (
         f"🏦 {b.get('description', '—')[:30]}  ¥{b.get('amount') or 0:,}  ·  "
         f"削除: {deleted_at}"

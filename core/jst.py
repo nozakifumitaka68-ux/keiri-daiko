@@ -36,3 +36,32 @@ def now_compact_str() -> str:
 def now_yyyymmdd() -> str:
     """JST の今日の日付を YYYYMMDD 形式で返す(ファイル名用)"""
     return now_jst().strftime("%Y%m%d")
+
+
+def to_jst_display(iso_str: str | None, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """
+    ISO文字列(UTC含む)を JST に変換して指定フォーマットで返す。
+
+    Supabase の TIMESTAMPTZ は UTC で返ってくるため、
+    UI 表示時に JST に戻すために使う。
+
+    Args:
+        iso_str: ISO8601 形式の文字列(タイムゾーン情報あり/なし両対応)
+        fmt: strftime フォーマット
+    Returns:
+        JST に変換された文字列。パース失敗時は元の文字列の先頭19文字
+    """
+    if not iso_str:
+        return ""
+    try:
+        # 末尾が 'Z' なら UTC → +00:00 に置換(Pythonで解釈可能に)
+        normalized = iso_str.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        # タイムゾーン情報がない場合は UTC とみなす(Supabaseの返却仕様)
+        if dt.tzinfo is None:
+            from datetime import timezone
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(JST).strftime(fmt)
+    except (ValueError, TypeError):
+        # フォールバック: 元の文字列の先頭19文字を「日付 時刻」形式に
+        return str(iso_str)[:19].replace("T", " ")
